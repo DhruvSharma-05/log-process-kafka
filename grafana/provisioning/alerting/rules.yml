@@ -1,0 +1,57 @@
+apiVersion: 1
+
+# FR4.2 — fire when a service's error rate exceeds a configurable threshold
+# over a configurable window. Defaults: >5% over 5 minutes.
+#
+# Both knobs live in the SQL below (INTERVAL 5 MINUTE) and the threshold
+# expression (params: [5]). The `for: 1m` clause means the condition must hold
+# for a full minute before firing, which suppresses single-window blips.
+groups:
+  - orgId: 1
+    name: service-error-rate
+    folder: Logpipe
+    interval: 30s
+    rules:
+      - uid: logpipe-error-rate
+        title: Service error rate above 5%
+        condition: THRESHOLD
+        for: 1m
+        # A service with no traffic is not a healthy service to alert on, but it
+        # is also not an error spike — stay quiet rather than page on silence.
+        noDataState: OK
+        execErrState: Alerting
+        labels:
+          severity: critical
+          pipeline: logpipe
+        annotations:
+          summary: "Error rate on {{ $labels.service }} exceeded 5% over the last 5 minutes."
+          runbook: "Check the Service Health dashboard, then the dead-letter-queue topic for parse failures."
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: clickhouse
+            model:
+              refId: A
+              editorType: sql
+              format: 2
+              # HAVING count() >= 20 avoids paging on a service that served
+              # three requests, two of which happened to fail.
+              rawSql: >
+                SELECT service,
+                       round(100 * countIf(is_error) / count(), 3) AS error_rate
+                FROM logpipe.logs_hot
+                WHERE timestamp > now() - INTERVAL 5 MINUTE
+                GROUP BY service
+                HAVING count() >= 20
+          - refId: THRESHOLD
+            datasourceUid: __expr__
+            model:
+              refId: THRESHOLD
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [5]

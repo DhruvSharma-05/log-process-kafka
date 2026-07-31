@@ -1,0 +1,37 @@
+<!--
+  Tiered storage for FR3.2: recent data on local disk, aged data on S3 (MinIO).
+
+  The `hot_cold` policy gives logs_hot two volumes. A TTL rule on the table
+  moves parts from `hot` to `cold` once they age past the retention window;
+  the data stays queryable either way, it just lives somewhere cheaper.
+-->
+<clickhouse>
+    <storage_configuration>
+        <disks>
+            <s3_cold>
+                <type>s3</type>
+                <endpoint>http://minio:9000/logpipe-archive/</endpoint>
+                <access_key_id>minioadmin</access_key_id>
+                <secret_access_key>minioadmin</secret_access_key>
+                <region>us-east-1</region>
+                <!-- MinIO does not support virtual-hosted-style addressing by default -->
+                <use_environment_credentials>false</use_environment_credentials>
+                <skip_access_check>false</skip_access_check>
+            </s3_cold>
+        </disks>
+
+        <policies>
+            <hot_cold>
+                <volumes>
+                    <hot>
+                        <disk>default</disk>
+                    </hot>
+                    <cold>
+                        <disk>s3_cold</disk>
+                        <prefer_not_to_merge>true</prefer_not_to_merge>
+                    </cold>
+                </volumes>
+            </hot_cold>
+        </policies>
+    </storage_configuration>
+</clickhouse>

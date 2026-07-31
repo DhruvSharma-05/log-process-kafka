@@ -1,0 +1,6 @@
+# Shared dev/tooling deps. Service-specific deps live in producer/ and processor/.
+confluent-kafka>=2.6.0
+prometheus-client>=0.21.0
+jsonschema>=4.23.0
+requests>=2.32.0
+pytest>=8.0.0

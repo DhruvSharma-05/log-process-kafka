@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://logpipe.local/schemas/dlq_event.json",
+  "title": "DeadLetterEvent",
+  "description": "A record that failed somewhere in the pipeline, with the reason attached (FR2.3).",
+  "type": "object",
+  "required": ["failed_at", "error_reason", "error_stage", "original"],
+  "additionalProperties": false,
+  "properties": {
+    "event_id": { "type": ["string", "null"] },
+    "failed_at": { "type": "string", "format": "date-time" },
+    "error_reason": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "description": "Human-readable cause, e.g. 'does not match access-log format'."
+    },
+    "error_stage": {
+      "type": "string",
+      "enum": ["decode", "parse", "enrich", "validate", "produce"],
+      "description": "Where it broke, so the DLQ can be grouped by failure mode."
+    },
+    "service": { "type": ["string", "null"] },
+    "original": {
+      "type": ["object", "string", "null"],
+      "description": "The failed payload, verbatim, so it can be replayed after a parser fix."
+    }
+  }
+}

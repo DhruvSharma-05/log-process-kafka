@@ -1,0 +1,13 @@
+<!--
+  Listen on all interfaces so the HTTP (8123), native (9000) and Prometheus
+  (9363) ports are reachable from outside the container.
+
+  The official image normally drops its own `docker_related_config.xml` into
+  this directory to do exactly this. Because we bind-mount config.d read-only,
+  that file never appears — ClickHouse falls back to the shipped default of
+  127.0.0.1/::1, which works from `docker exec` but is unreachable from the
+  host, Grafana or Prometheus. So we set it ourselves.
+-->
+<clickhouse>
+    <listen_host>0.0.0.0</listen_host>
+</clickhouse>

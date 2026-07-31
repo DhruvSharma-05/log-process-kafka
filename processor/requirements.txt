@@ -1,0 +1,6 @@
+confluent-kafka>=2.6.0
+prometheus-client>=0.21.0
+jsonschema>=4.23.0
+# Optional: enables MaxMind geo lookups when a GeoLite2 .mmdb is present.
+# Without it, enrichment falls back to ccTLD inference (see enrich.py).
+geoip2>=4.8.0

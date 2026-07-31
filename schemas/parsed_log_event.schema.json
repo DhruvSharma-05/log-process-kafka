@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://logpipe.local/schemas/parsed_log_event.json",
+  "title": "ParsedLogEvent",
+  "description": "A structured, enriched log event. Written to parsed-logs and error-logs.",
+  "type": "object",
+  "required": ["event_id", "timestamp", "ingested_at", "host", "service", "log_level"],
+  "additionalProperties": false,
+  "properties": {
+    "event_id": { "type": "string", "minLength": 8, "maxLength": 64 },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Event time, parsed from the log line itself."
+    },
+    "ingested_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Pipeline entry time, stamped by the producer. Event time minus this is ingest lag."
+    },
+    "processed_at": { "type": "string", "format": "date-time" },
+    "host": { "type": "string", "minLength": 1 },
+    "service": { "type": "string", "minLength": 1 },
+    "source_format": { "type": "string", "enum": ["nginx_combined", "json_app"] },
+
+    "client_ip": {
+      "type": ["string", "null"],
+      "description": "Raw client address or hostname. Null when REDACT_CLIENT_IP is set."
+    },
+    "client_ip_hash": {
+      "type": ["string", "null"],
+      "description": "Salted hash retained in long-term storage (Data privacy NFR)."
+    },
+    "geo_country": {
+      "type": ["string", "null"],
+      "minLength": 2,
+      "maxLength": 2,
+      "description": "ISO 3166-1 alpha-2. Null for private, reserved or unresolvable clients."
+    },
+    "geo_source": {
+      "type": "string",
+      "enum": ["maxmind", "tld", "private", "unresolved"],
+      "description": "How geo_country was determined; inference is never presented as a lookup."
+    },
+
+    "http_method": { "type": ["string", "null"] },
+    "path": { "type": ["string", "null"] },
+    "path_group": {
+      "type": ["string", "null"],
+      "description": "First path segment, for low-cardinality dashboard grouping."
+    },
+    "status_code": { "type": ["integer", "null"], "minimum": 100, "maximum": 599 },
+    "response_bytes": { "type": ["integer", "null"], "minimum": 0 },
+    "response_time_ms": { "type": ["integer", "null"], "minimum": 0 },
+
+    "log_level": {
+      "type": "string",
+      "enum": ["TRACE", "DEBUG", "INFO", "WARN", "ERROR", "FATAL"]
+    },
+    "is_error": { "type": "boolean" },
+    "message": { "type": ["string", "null"] },
+    "user_agent": { "type": ["string", "null"] },
+    "referer": { "type": ["string", "null"] },
+    "trace_id": { "type": ["string", "null"] }
+  }
+}

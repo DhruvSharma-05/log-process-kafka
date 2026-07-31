@@ -1,0 +1,225 @@
+name: logpipe
+
+services:
+  # ---------------------------------------------------------------------------
+  # Kafka in KRaft mode (no ZooKeeper). Single node = broker + controller.
+  # Dev only: RF=1. See docker-compose.prod.yml (M6) for the 3-broker profile.
+  # ---------------------------------------------------------------------------
+  kafka:
+    image: confluentinc/cp-kafka:7.6.1
+    container_name: logpipe-kafka
+    ports:
+      # 29092 is the host-facing listener. Anything running outside Docker
+      # (producer, processor, smoke test) must use localhost:29092, NOT 9092.
+      - "29092:29092"
+    environment:
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:29093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:29093,PLAINTEXT_HOST://0.0.0.0:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      # Single broker -> every internal topic must be RF=1 or startup fails.
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      # Topics are created explicitly by scripts/create_topics.sh so that
+      # partition counts and retention are never accidentally defaulted.
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_LOG_RETENTION_CHECK_INTERVAL_MS: 60000
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+      - ./scripts:/scripts:ro
+    healthcheck:
+      test: ["CMD", "kafka-topics", "--bootstrap-server", "localhost:9092", "--list"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 20s
+
+  # ---------------------------------------------------------------------------
+  # Schema Registry — enforces the parsed-log contract (PRD schema-drift risk).
+  # We register JSON Schema, not Avro: no codegen step in a Python pipeline.
+  # ---------------------------------------------------------------------------
+  schema-registry:
+    image: confluentinc/cp-schema-registry:7.6.1
+    container_name: logpipe-schema-registry
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports:
+      - "8081:8081"
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: PLAINTEXT://kafka:9092
+      SCHEMA_REGISTRY_KAFKASTORE_TOPIC_REPLICATION_FACTOR: 1
+      SCHEMA_REGISTRY_SCHEMA_COMPATIBILITY_LEVEL: backward
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8081/subjects"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  # ---------------------------------------------------------------------------
+  # Kafka UI — not a PRD requirement, but it makes "message round-trips
+  # visibly" (M0 exit criterion) and every later DLQ debug session trivial.
+  # ---------------------------------------------------------------------------
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: logpipe-kafka-ui
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: logpipe-dev
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      KAFKA_CLUSTERS_0_SCHEMAREGISTRY: http://schema-registry:8081
+      DYNAMIC_CONFIG_ENABLED: "true"
+
+  # ---------------------------------------------------------------------------
+  # ClickHouse — hot storage. Consumes `parsed-logs` directly via the Kafka
+  # table engine, so no Kafka Connect is needed (see IMPLEMENTATION.md §1).
+  # ---------------------------------------------------------------------------
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    container_name: logpipe-clickhouse
+    depends_on:
+      kafka:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    ports:
+      - "8123:8123"   # HTTP / query interface
+      - "9000:9000"   # native protocol
+      - "9363:9363"   # Prometheus metrics
+    environment:
+      CLICKHOUSE_SKIP_USER_SETUP: "1"
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+      - ./clickhouse/config.d:/etc/clickhouse-server/config.d:ro
+      - ./clickhouse:/sql:ro
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  # ---------------------------------------------------------------------------
+  # MinIO — S3-compatible cold storage. Keeps the stack cloud-free
+  # (Portability NFR) while exercising the real S3 code path in ClickHouse.
+  # ---------------------------------------------------------------------------
+  minio:
+    image: minio/minio:latest
+    container_name: logpipe-minio
+    command: server /data --console-address ":9001"
+    ports:
+      - "9002:9000"   # S3 API (9000 on the host belongs to ClickHouse)
+      - "9001:9001"   # web console
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+
+  # Creates the archive bucket, then exits. ClickHouse waits for it to finish.
+  minio-init:
+    image: minio/mc:latest
+    container_name: logpipe-minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 minioadmin minioadmin &&
+      mc mb --ignore-existing local/logpipe-archive &&
+      echo 'bucket logpipe-archive ready'"
+
+  # ---------------------------------------------------------------------------
+  # ksqlDB — windowed aggregates (FR2.4). Computes request/error counts per
+  # service per 1-minute tumbling window and publishes them to
+  # `service-metrics-1m` as a stream.
+  # ---------------------------------------------------------------------------
+  ksqldb:
+    image: confluentinc/ksqldb-server:0.29.0
+    container_name: logpipe-ksqldb
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports:
+      - "8088:8088"
+    environment:
+      KSQL_LISTENERS: http://0.0.0.0:8088
+      KSQL_BOOTSTRAP_SERVERS: kafka:9092
+      KSQL_KSQL_SERVICE_ID: logpipe_
+      # Single broker in dev: every internal topic must be RF=1.
+      KSQL_KSQL_INTERNAL_TOPIC_REPLICAS: 1
+      KSQL_KSQL_STREAMS_REPLICATION_FACTOR: 1
+      KSQL_KSQL_LOGGING_PROCESSING_TOPIC_REPLICATION_FACTOR: 1
+      KSQL_KSQL_LOGGING_PROCESSING_TOPIC_AUTO_CREATE: "true"
+      KSQL_KSQL_LOGGING_PROCESSING_STREAM_AUTO_CREATE: "true"
+      KSQL_KSQL_STREAMS_AUTO_OFFSET_RESET: latest
+      KSQL_KSQL_SUPPRESS_ENABLED: "true"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8088/info"]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+      start_period: 40s
+
+  # ---------------------------------------------------------------------------
+  # Grafana — dashboards (FR4.1) and alerting (FR4.2, FR4.3).
+  # Everything is provisioned from files so the repo is self-serve; no
+  # click-ops required to reproduce the dashboards.
+  # ---------------------------------------------------------------------------
+  grafana:
+    image: grafana/grafana:11.3.0
+    container_name: logpipe-grafana
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_DEFAULT_THEME: dark
+      GF_INSTALL_PLUGINS: grafana-clickhouse-datasource
+      GF_FEATURE_TOGGLES_ENABLE: alertingSimplifiedRouting
+      # Set this in .env to receive alerts in Slack (FR4.3). Without it the
+      # rule still fires and is visible in the UI; only delivery is skipped.
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-https://hooks.slack.com/services/REPLACE/WITH/YOURS}
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/api/health | grep -q ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+      start_period: 30s
+
+volumes:
+  kafka-data:
+  clickhouse-data:
+  minio-data:
+  grafana-data:

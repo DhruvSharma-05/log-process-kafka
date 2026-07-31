@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://logpipe.local/schemas/raw_log_event.json",
+  "title": "RawLogEvent",
+  "description": "An ingested log line before parsing. Written to the raw-logs topic.",
+  "type": "object",
+  "required": ["event_id", "ingested_at", "host", "service", "source_format", "raw_message"],
+  "additionalProperties": true,
+  "properties": {
+    "event_id": {
+      "type": "string",
+      "minLength": 8,
+      "maxLength": 64,
+      "description": "Content hash; stable across replays so downstream storage can dedupe."
+    },
+    "ingested_at": { "type": "string", "format": "date-time" },
+    "host": { "type": "string", "minLength": 1 },
+    "service": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Also the Kafka partition key (FR1.3)."
+    },
+    "source_format": { "type": "string", "enum": ["nginx_combined", "json_app"] },
+    "raw_message": { "type": "string", "minLength": 1 }
+  }
+}

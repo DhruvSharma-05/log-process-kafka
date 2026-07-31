@@ -1,0 +1,23 @@
+# Datasets — downloaded via scripts/download_data.ps1, never committed
+data/*
+!data/.gitkeep
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+*.egg-info/
+
+# Local config
+.env
+
+# Geo-IP database (license restricted, downloaded separately)
+*.mmdb
+
+# Editor / OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
