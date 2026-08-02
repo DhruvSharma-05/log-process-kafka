@@ -1,0 +1,38 @@
+global:
+  scrape_interval: 10s
+  evaluation_interval: 10s
+  external_labels:
+    cluster: logpipe-dev
+
+scrape_configs:
+  # Kafka consumer lag, per group and per partition (FR5.1).
+  - job_name: kafka
+    static_configs:
+      - targets: ["kafka-exporter:9308"]
+
+  # Hot storage: query rates, merges, part counts, memory.
+  - job_name: clickhouse
+    static_configs:
+      - targets: ["clickhouse:9363"]
+
+  # The processor and producer run on the host, not in Compose, so Prometheus
+  # reaches them through Docker Desktop's host gateway. They are legitimately
+  # DOWN when not running — the dashboard shows that rather than hiding it.
+  # Multiple processor instances for the horizontal-scaling NFR. Each needs its
+  # own --http-port: on Windows, Python's HTTPServer sets SO_REUSEADDR, which
+  # lets a second instance bind an already-live port with no error and silently
+  # shadow the first — so a port collision looks like a healthy single instance.
+  - job_name: processor
+    static_configs:
+      - targets:
+          - "host.docker.internal:8000"
+          - "host.docker.internal:8010"
+          - "host.docker.internal:8020"
+
+  - job_name: producer
+    static_configs:
+      - targets: ["host.docker.internal:8001"]
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

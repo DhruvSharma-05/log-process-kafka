@@ -4,6 +4,8 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 
+from common.kafka_security import security_conf
+
 # Host-side clients use the PLAINTEXT_HOST listener. Anything running *inside*
 # Docker Compose must use kafka:9092 instead. See docker-compose.yml.
 DEFAULT_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP", "localhost:29092")
@@ -50,7 +52,10 @@ class ProducerConfig:
     metrics_port: int = DEFAULT_METRICS_PORT
 
     def kafka_conf(self) -> dict[str, object]:
+        # Security settings come from the environment so the same binary runs
+        # against the dev (PLAINTEXT) and production (SASL) profiles.
         return {
+            **security_conf(),
             "bootstrap.servers": self.bootstrap,
             # Durability: wait for all in-sync replicas. Idempotence removes
             # duplicates introduced by internal retries.

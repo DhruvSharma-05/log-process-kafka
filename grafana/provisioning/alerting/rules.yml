@@ -55,3 +55,97 @@ groups:
                 - evaluator:
                     type: gt
                     params: [5]
+
+  # M5 — health of the pipeline itself, not of the services it observes.
+  - orgId: 1
+    name: pipeline-health
+    folder: Logpipe
+    interval: 30s
+    rules:
+      - uid: logpipe-consumer-lag
+        title: Kafka consumer lag is growing
+        condition: THRESHOLD
+        # Bursts are normal and expected to drain (the PRD's success metric is
+        # <60s to clear a 2x spike). Only sustained lag is worth waking someone.
+        for: 3m
+        noDataState: OK
+        execErrState: OK
+        labels:
+          severity: warning
+          pipeline: logpipe
+        annotations:
+          summary: "Consumer group {{ $labels.consumergroup }} is more than 50k messages behind."
+          runbook: "Check the Pipeline Health dashboard. If throughput is flat, the processor is down or stuck; if throughput is high, scale consumers or add partitions."
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: sum by (consumergroup) (kafka_consumergroup_lag_sum{consumergroup!~"_confluent.*"})
+              range: true
+              instant: false
+              intervalMs: 30000
+              maxDataPoints: 100
+          - refId: REDUCE
+            datasourceUid: __expr__
+            model:
+              refId: REDUCE
+              type: reduce
+              reducer: last
+              expression: A
+          - refId: THRESHOLD
+            datasourceUid: __expr__
+            model:
+              refId: THRESHOLD
+              type: threshold
+              expression: REDUCE
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [50000]
+
+      - uid: logpipe-dlq-rate
+        title: Dead-letter rate elevated
+        condition: THRESHOLD
+        for: 2m
+        noDataState: OK
+        execErrState: OK
+        labels:
+          severity: warning
+          pipeline: logpipe
+        annotations:
+          summary: "Events are being dead-lettered at more than 5/s — likely a producer format change or schema drift."
+          runbook: "Inspect the dead-letter-queue topic (make dlq). Group by error_stage: 'parse' means a new log format, 'validate' means schema drift."
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: sum(rate(logpipe_processor_dlq_total[5m]))
+              range: true
+              instant: false
+              intervalMs: 30000
+              maxDataPoints: 100
+          - refId: REDUCE
+            datasourceUid: __expr__
+            model:
+              refId: REDUCE
+              type: reduce
+              reducer: last
+              expression: A
+          - refId: THRESHOLD
+            datasourceUid: __expr__
+            model:
+              refId: THRESHOLD
+              type: threshold
+              expression: REDUCE
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [5]

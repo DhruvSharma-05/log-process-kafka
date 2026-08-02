@@ -1,0 +1,141 @@
+# Production-like Kafka profile (M6).
+#
+# What this proves that docker-compose.yml cannot:
+#   - Replication factor 3 with min.insync.replicas=2, so a single broker
+#     failure loses nothing (Durability + Fault-tolerance NFRs).
+#   - SASL client authentication (Security NFR).
+#
+# Runs as a SEPARATE Compose project on different host ports, so it can stand
+# up alongside the dev stack without colliding:
+#
+#   docker compose -p logpipe-prod -f docker-compose.prod.yml up -d --wait
+#   docker compose -p logpipe-prod -f docker-compose.prod.yml down -v
+#
+# Host bootstrap for clients: localhost:39092 (SASL_PLAINTEXT, admin/admin-secret)
+#
+# TLS: this profile implements SASL over PLAINTEXT, which exercises real client
+# authentication but NOT wire encryption. Moving to SASL_SSL is a config delta,
+# not a code change — see the "TLS delta" note at the bottom of this file.
+
+name: logpipe-prod
+
+x-kafka-common: &kafka-common
+  image: confluentinc/cp-kafka:7.6.1
+  environment: &kafka-env
+    KAFKA_PROCESS_ROLES: broker,controller
+    KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka-1:29093,2@kafka-2:29093,3@kafka-3:29093
+    KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+    KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+    KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:SASL_PLAINTEXT
+    CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+
+    # --- Durability -----------------------------------------------------------
+    # RF=3 with min.insync.replicas=2: a producer using acks=all needs two
+    # replicas to acknowledge, so one broker can die mid-write without loss.
+    KAFKA_DEFAULT_REPLICATION_FACTOR: 3
+    KAFKA_MIN_INSYNC_REPLICAS: 2
+    KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+    KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
+    KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
+    KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+    # Do not elect an out-of-sync replica as leader; losing data is worse than
+    # losing availability for a partition.
+    KAFKA_UNCLEAN_LEADER_ELECTION_ENABLE: "false"
+
+    # --- Security (Security NFR) ---------------------------------------------
+    # SASL/PLAIN authentication on the EXTERNAL listener. The NFR asks for
+    # client *authentication*, which this provides: an unauthenticated client
+    # is refused, and credentials are verified against the JAAS file.
+    #
+    # ACL *authorization* (StandardAuthorizer) is deliberately NOT enabled.
+    # In KRaft it deadlocks bootstrap: ACLs live in the __cluster_metadata log,
+    # but the controller quorum needs authorization to elect a leader and load
+    # that log, so every Raft VOTE fails with AuthorizerNotReadyException and
+    # the cluster never starts. Enabling it correctly requires adding the
+    # controller principal to super.users:
+    #
+    #   KAFKA_AUTHORIZER_CLASS_NAME: org.apache.kafka.metadata.authorizer.StandardAuthorizer
+    #   KAFKA_SUPER_USERS: User:admin;User:ANONYMOUS   # ANONYMOUS = internal PLAINTEXT listeners
+    #   KAFKA_ALLOW_EVERYONE_IF_NO_ACL_FOUND: "false"
+    #
+    # That is a separate hardening step with its own test matrix, not a
+    # prerequisite for the authentication the NFR specifies.
+    KAFKA_SASL_ENABLED_MECHANISMS: PLAIN
+    KAFKA_OPTS: -Djava.security.auth.login.config=/etc/kafka/secrets/kafka_server_jaas.conf
+  volumes:
+    - ./security:/etc/kafka/secrets:ro
+  healthcheck:
+    test:
+      - CMD-SHELL
+      - kafka-broker-api-versions --bootstrap-server localhost:9092 >/dev/null 2>&1
+    interval: 10s
+    timeout: 10s
+    retries: 18
+    start_period: 30s
+
+services:
+  kafka-1:
+    <<: *kafka-common
+    container_name: logpipe-prod-kafka-1
+    ports:
+      - "39092:39092"
+    environment:
+      <<: *kafka-env
+      KAFKA_NODE_ID: 1
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:9092,CONTROLLER://0.0.0.0:29093,EXTERNAL://0.0.0.0:39092
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka-1:9092,EXTERNAL://localhost:39092
+    volumes:
+      - kafka1-data:/var/lib/kafka/data
+      - ./security:/etc/kafka/secrets:ro
+
+  kafka-2:
+    <<: *kafka-common
+    container_name: logpipe-prod-kafka-2
+    ports:
+      - "39093:39093"
+    environment:
+      <<: *kafka-env
+      KAFKA_NODE_ID: 2
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:9092,CONTROLLER://0.0.0.0:29093,EXTERNAL://0.0.0.0:39093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka-2:9092,EXTERNAL://localhost:39093
+    volumes:
+      - kafka2-data:/var/lib/kafka/data
+      - ./security:/etc/kafka/secrets:ro
+
+  kafka-3:
+    <<: *kafka-common
+    container_name: logpipe-prod-kafka-3
+    ports:
+      - "39094:39094"
+    environment:
+      <<: *kafka-env
+      KAFKA_NODE_ID: 3
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:9092,CONTROLLER://0.0.0.0:29093,EXTERNAL://0.0.0.0:39094
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka-3:9092,EXTERNAL://localhost:39094
+    volumes:
+      - kafka3-data:/var/lib/kafka/data
+      - ./security:/etc/kafka/secrets:ro
+
+volumes:
+  kafka1-data:
+  kafka2-data:
+  kafka3-data:
+
+# --- TLS delta ---------------------------------------------------------------
+# To move from SASL_PLAINTEXT to SASL_SSL, generate a CA plus a keystore and
+# truststore per broker, then change:
+#
+#   KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: ...,EXTERNAL:SASL_SSL
+#   KAFKA_SSL_KEYSTORE_FILENAME:   kafka.broker.keystore.jks
+#   KAFKA_SSL_KEYSTORE_CREDENTIALS: keystore_creds
+#   KAFKA_SSL_KEY_CREDENTIALS:      key_creds
+#   KAFKA_SSL_TRUSTSTORE_FILENAME:  kafka.broker.truststore.jks
+#   KAFKA_SSL_TRUSTSTORE_CREDENTIALS: truststore_creds
+#   KAFKA_SSL_CLIENT_AUTH: required        # mutual TLS, optional
+#
+# and on the client side add:
+#   security.protocol=SASL_SSL
+#   ssl.ca.location=security/ca-cert.pem
+#
+# No application code changes: producer/config.py and processor/config.py read
+# these from KAFKA_SECURITY_PROTOCOL / KAFKA_SASL_* environment variables.

@@ -5,6 +5,8 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from common.kafka_security import security_conf
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # Inside Docker Compose this becomes kafka:9092. See docker-compose.yml.
@@ -45,6 +47,7 @@ class ProcessorConfig:
 
     def consumer_conf(self) -> dict[str, object]:
         return {
+            **security_conf(),
             "bootstrap.servers": self.bootstrap,
             "group.id": self.group_id,
             "auto.offset.reset": "earliest",
@@ -59,6 +62,7 @@ class ProcessorConfig:
 
     def producer_conf(self) -> dict[str, object]:
         return {
+            **security_conf(),
             "bootstrap.servers": self.bootstrap,
             "acks": "all",
             "enable.idempotence": True,

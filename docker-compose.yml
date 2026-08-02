@@ -218,8 +218,60 @@ services:
       retries: 18
       start_period: 30s
 
+  # ---------------------------------------------------------------------------
+  # kafka-exporter — consumer lag per group and partition (FR5.1). This is the
+  # single most important operational signal in the pipeline: it answers
+  # "are we keeping up?" independently of every component's own self-reporting.
+  # ---------------------------------------------------------------------------
+  kafka-exporter:
+    image: danielqsj/kafka-exporter:v1.7.0
+    container_name: logpipe-kafka-exporter
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports:
+      - "9308:9308"
+    command:
+      - --kafka.server=kafka:9092
+      - --web.listen-address=:9308
+      # Without this the exporter reports lag only for groups that have
+      # committed recently; we want every group, always.
+      - --topic.filter=.*
+      - --group.filter=.*
+
+  # ---------------------------------------------------------------------------
+  # Prometheus — scrapes the exporter, ClickHouse, and the host-side
+  # producer/processor (Observability NFR).
+  # ---------------------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    container_name: logpipe-prometheus
+    depends_on:
+      kafka-exporter:
+        condition: service_started
+    ports:
+      - "9090:9090"
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=7d
+      - --web.enable-lifecycle
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    extra_hosts:
+      # Lets Prometheus scrape the producer/processor running on the host.
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/-/healthy"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+
 volumes:
   kafka-data:
   clickhouse-data:
   minio-data:
   grafana-data:
+  prometheus-data:

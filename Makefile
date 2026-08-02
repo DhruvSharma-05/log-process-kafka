@@ -27,6 +27,18 @@ help:  ## Show available targets
 	@echo "  make metrics-1m   Tail the service-metrics-1m aggregate topic"
 	@echo "  make alerts       Show current Grafana alert-rule state"
 	@echo ""
+	@echo "Hardening (M6):"
+	@echo "  make loadtest     PRD burst test: 2x spike, measure drain (<60s)"
+	@echo "  make prod-up      Start the 3-broker RF=3 SASL cluster"
+	@echo "  make prod-auth    Verify SASL authentication is enforced"
+	@echo "  make prod-kill    Durability test: kill a broker mid-write"
+	@echo "  make prod-down    Tear down the production profile"
+	@echo ""
+	@echo "Observability:"
+	@echo "  make lag          Consumer lag per group (FR5.1)"
+	@echo "  make targets      Prometheus scrape target health"
+	@echo "  make backpressure How to run the induced-lag test"
+	@echo ""
 	@echo "Storage:"
 	@echo "  make ch-init  Apply the ClickHouse schema (idempotent)"
 	@echo "  make ch       Open a ClickHouse SQL shell"
@@ -113,6 +125,53 @@ metrics-1m:  ## Tail the ksqlDB aggregate output
 alerts:  ## Show current Grafana alert-rule state
 	@curl -s -u admin:admin http://localhost:3000/api/prometheus/grafana/api/v1/rules \
 		| python -c "import json,sys; d=json.load(sys.stdin); [print(f\"{r['name']}: {r['state']}\") or [print(f\"   {a['labels'].get('service','-')}: {a['state']}\") for a in r.get('alerts',[])] for g in d['data']['groups'] for r in g['rules']]"
+
+PROD = docker compose -p logpipe-prod -f docker-compose.prod.yml
+
+loadtest:  ## PRD burst test: baseline, 2x spike, measure drain (needs 'make process')
+	powershell -ExecutionPolicy Bypass -File scripts/load_test.ps1
+
+prod-up:  ## Start the production profile: 3 brokers, RF=3, SASL auth
+	$(PROD) up -d --wait
+	$(PROD) exec -T kafka-1 kafka-topics --bootstrap-server localhost:9092 \
+		--create --if-not-exists --topic raw-logs --partitions 6 \
+		--replication-factor 3 --config min.insync.replicas=2
+	@echo "bootstrap: localhost:39092 (SASL_PLAINTEXT, logpipe/logpipe-secret)"
+
+prod-auth:  ## Verify SASL authentication is enforced (Security NFR)
+	python scripts/prod_smoke.py --auth
+
+prod-kill:  ## Durability test. Run '$(PROD) kill kafka-2' in another shell mid-run.
+	python scripts/prod_smoke.py --durability --count 400000 --rate 10000
+
+prod-down:  ## Tear down the production profile and its volumes
+	$(PROD) down -v
+
+lag:  ## Consumer lag per group (FR5.1)
+	@for g in log-processor clickhouse-parsed; do \
+		printf "%-20s" $$g; \
+		$(COMPOSE) exec -T kafka kafka-consumer-groups --bootstrap-server localhost:9092 \
+			--describe --group $$g 2>/dev/null \
+			| awk 'NR>1 && $$6 ~ /^[0-9]+$$/ {s+=$$6; n++} \
+			       END {if (n==0) print "      n/a (no partitions reported)"; else printf "%10d\n", s}'; \
+	done
+	@echo "(n/a means the group has no assignment or Kafka is unreachable — not zero lag)"
+
+targets:  ## Prometheus scrape target health
+	@curl -s http://localhost:9090/api/v1/targets \
+		| python -c "import json,sys; [print(f\"{t['labels']['job']:<12} {t['health']:<6} {t['scrapeUrl']}\") for t in json.load(sys.stdin)['data']['activeTargets']]"
+
+backpressure:  ## Print the induced-lag test recipe (M5 exit criterion)
+	@echo "Induced backpressure test:"
+	@echo "  1. Stop the processor (Ctrl-C in its terminal)"
+	@echo "  2. make burst          # floods raw-logs at 3000/s"
+	@echo "  3. watch 'make lag'    # lag climbs linearly"
+	@echo "  4. make process        # restart the processor"
+	@echo "  5. watch 'make lag'    # lag drains back to 0"
+	@echo "  Dashboard: http://localhost:3000 -> Logpipe -> Pipeline Health"
+
+burst:  ## Flood raw-logs at 3000/s for 3 minutes (backpressure test)
+	python -m producer.scenarios --scenario burst --rate 3000 --duration 180
 
 ch-init:  ## Apply the ClickHouse schema (idempotent)
 	$(COMPOSE) exec -T clickhouse clickhouse-client --multiquery < clickhouse/01_tables.sql
