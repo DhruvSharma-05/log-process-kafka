@@ -1,2 +1,4 @@
 confluent-kafka>=2.6.0
 prometheus-client>=0.21.0
+# Live external sources (producer/sources/) and the HTTP sink.
+requests>=2.32.0

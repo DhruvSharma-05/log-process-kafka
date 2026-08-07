@@ -737,7 +737,65 @@ real public IPs for demo purposes.
 
 **All milestones are complete.** The pipeline ingests, parses, enriches, redacts, stores, tiers,
 aggregates, visualises, alerts, and observes itself — with every PRD success metric measured rather
-than asserted, and 117 unit tests passing.
+than asserted, and 172 unit tests passing.
+
+---
+
+## M8 — Real-time ingestion (post-PRD extension) ✅ DONE
+
+Added after the milestones: two live paths in, replacing file replay as the primary demonstration.
+
+**Build:** `ingest/` (FastAPI gateway), `producer/sources/wikipedia.py`, 55 new tests.
+
+- [x] `POST /v1/logs` — single JSON application log
+- [x] `POST /v1/logs/bulk` — NDJSON or JSON array, with real partial success
+- [x] `POST /v1/logs/raw` — plain access-log lines
+- [x] `/healthz`, `/readyz` (503 under backpressure), `/metrics`
+- [x] Backpressure → `429` + `Retry-After` rather than unbounded buffering
+- [x] Live Wikimedia EventStreams consumer with SSE reconnect and backoff
+- [x] Both sinks: straight to Kafka, or routed through the gateway
+- [x] Prometheus scrapes the gateway (`:8100`) and live sources (`:8002`)
+
+Both paths produce the **same `raw-logs` envelope** as the file replayer, so the processor,
+ClickHouse, dashboards and alerts required no changes at all.
+
+**Verified end to end:**
+
+```text
+POST /v1/logs        -> {"accepted":1,"event_id":"8424d00c...","service":"payments-api"}
+POST /v1/logs/bulk   -> {"accepted":3,"rejected":1,"errors":[{"line":3,"error":"invalid JSON: ..."}]}
+POST /v1/logs/raw    -> {"accepted":2}
+
+live Wikimedia: 630 edits forwarded from 8+ wikis
+end-to-end latency for genuinely external live data:  p50 0.87s   p95 1.55s
+```
+
+PII scrubbing confirmed on API-submitted data: `card declined for alice@example.com` was stored as
+`card declined for [email]`.
+
+**⚠ Design fix — the first `curl` example dead-lettered.** A JSON log with no timestamp failed
+parsing and went to the DLQ with a correct, precise reason. The pipeline was right; the *API* was
+wrong. An ingestion endpoint that silently drops logs from any client that omits a field is hostile
+to the simplest use case. The gateway now stamps receipt time when no timestamp is present, counting
+it in `logpipe_ingest_timestamp_defaulted_total`. Not applied to `/raw`, where a missing timestamp
+means a genuinely malformed access-log line.
+
+**⚠ Documented claim disproved by measurement.** The Wikimedia mapping was first written up as
+carrying "a real public IP for anonymous edits", which would have made it a live test of geo-IP.
+Checking the actual data:
+
+```text
+ipv4_editors: 0    ipv6_editors: 0    temp_accounts: 21    named_accounts: 609
+```
+
+Wikimedia masks anonymous editors behind temporary accounts (`~2026-43591-61`), so `client_ip` is
+never an IP and geo resolution correctly reports `unresolved`. The docstring was corrected and a test
+now pins the behaviour. Worth noting because the claim was plausible, written confidently, and wrong
+— only running the query settled it.
+
+**Deliberate non-mapping:** `response_time_ms` is left null for Wikimedia events. The source has no
+latency field, and fabricating one would put fiction on the one dashboard that is otherwise measuring
+something real.
 
 Open items needing a human:
 

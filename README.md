@@ -28,8 +28,11 @@ flowchart LR
         NASA[NASA access logs<br/>1.57M real requests]
         SCEN[Scenario generator<br/>error spikes, corrupt lines]
         FLOG[flog / stdin]
+        WIKI[Wikimedia EventStreams<br/>live SSE firehose]
+        APPS[Your applications<br/>curl · SDK · Filebeat]
     end
 
+    GATE[ingest gateway :8100<br/>POST /v1/logs · /bulk · /raw]
     PROD[producer<br/>Python]
     RAW[(raw-logs<br/>6 partitions, 24h)]
     PROC[processor<br/>parse · enrich · redact · validate]
@@ -48,6 +51,10 @@ flowchart LR
     NASA --> PROD
     SCEN --> PROD
     FLOG --> PROD
+    APPS -->|HTTP| GATE
+    WIKI --> PROD
+    WIKI -.->|--sink http| GATE
+    GATE -->|key = service| RAW
     PROD -->|key = service| RAW
     RAW --> PROC
     PROC --> PARSED
@@ -139,6 +146,88 @@ Individual scenarios: `make spike`, `make corrupt` (fills the DLQ), `make burst`
 
 ---
 
+## Real-time ingestion
+
+Two live paths in, both landing in the same `raw-logs` envelope so nothing
+downstream changes.
+
+### 1. HTTP gateway — your applications push logs (FR1.1)
+
+```bash
+make ingest        # gateway on :8100
+```
+
+```bash
+# one JSON log
+curl -X POST localhost:8100/v1/logs -H 'Content-Type: application/json' \
+  -d '{"service":"checkout-api","level":"ERROR","message":"payment timeout","status_code":500}'
+# -> {"accepted":1,"event_id":"8424d00c...","service":"checkout-api"}
+
+# many, newline-delimited (partial success is real)
+curl -X POST localhost:8100/v1/logs/bulk --data-binary @logs.ndjson
+# -> {"accepted":3,"rejected":1,"errors":[{"line":3,"error":"invalid JSON: ..."}]}
+
+# plain access-log lines, straight from a file
+tail -f /var/log/nginx/access.log | \
+  curl -X POST 'localhost:8100/v1/logs/raw?service=web' --data-binary @-
+```
+
+| Route | Body | Notes |
+| --- | --- | --- |
+| `POST /v1/logs` | one JSON object | `?service=` and `?host=` override the body |
+| `POST /v1/logs/bulk` | NDJSON or a JSON array | valid lines are kept when others fail |
+| `POST /v1/logs/raw` | plain text, one line each | `?source_format=nginx_combined\|json_app` |
+| `GET /healthz` `/readyz` `/metrics` | — | `/readyz` returns 503 under backpressure |
+
+Behaviours worth knowing:
+
+- **A log with no timestamp is stamped with receipt time**, not dead-lettered. Requiring every client
+  to send one would make the API hostile to the simple `curl` case. Counted in
+  `logpipe_ingest_timestamp_defaulted_total`, so the substitution is never invisible.
+- **Malformed input gets a 4xx with a reason**, rather than being dead-lettered. The DLQ is for
+  events that entered the pipeline and failed later; a client sending bad JSON should be told.
+- **Backpressure returns `429` with `Retry-After`** once the local queue passes its high-water mark,
+  instead of buffering without bound and lying to the caller.
+- `/v1/logs/raw` does **not** parse. Unparseable lines are forwarded and the processor
+  dead-letters them with a reason — which is what the DLQ is for.
+
+### 2. Live external firehose — Wikimedia EventStreams
+
+```bash
+make wiki          # straight to Kafka
+make wiki-http     # routed through the gateway, proving the HTTP path
+```
+
+Consumes <https://stream.wikimedia.org/v2/stream/recentchange>: every edit across every Wikimedia
+wiki, as Server-Sent Events. No API key, always on, ~30–50 events/sec. Unlike the file replayer this
+is not replayed history — measured latency against it is genuine end-to-end latency from a
+third-party system.
+
+Real output, live:
+
+```text
+┌─service───────────────┬─edits─┬─reverts─┬─editors─┐
+│ commons.wikimedia.org │   227 │       1 │      27 │
+│ en.wikipedia.org      │   121 │       0 │      47 │
+│ www.wikidata.org      │   101 │       0 │      25 │
+│ fr.wikipedia.org      │    30 │       0 │      13 │
+└───────────────────────┴───────┴─────────┴─────────┘
+
+end-to-end latency for live external data:  p50 0.87s   p95 1.55s
+```
+
+Each edit maps onto real fields only — `service` from `server_name`, `path` from the page title,
+`response_bytes` from the page's new length. **`response_time_ms` is deliberately left null**: the
+source has no such field and inventing one would put fiction on a latency dashboard.
+
+`client_ip` carries the editor identity. It is **not** an IP: Wikimedia masks anonymous editors
+behind temporary accounts (`~2026-43591-61`), so a live 630-edit sample held 609 named accounts, 21
+temporary accounts, and zero IPs. Geo enrichment correctly records `unresolved` — no country is
+guessed from a username. The PII hashing path is still exercised on a genuine user identifier.
+
+Error rates from this source are naturally near zero, because real wikis mostly work. Use
+`make spike` to exercise alerting.
+
 ## Components
 
 | Service | Port | Role |
@@ -154,6 +243,8 @@ Individual scenarios: `make spike`, `make corrupt` (fills the DLQ), `make burst`
 | Kafka UI | 8080 | Topic/message browser |
 | producer | 8001 | Host process |
 | processor | 8000 | Host process |
+| ingest gateway | 8100 | Host process (FastAPI) |
+| live sources | 8002 | Host process, metrics only |
 
 ## Topics
 
@@ -259,7 +350,7 @@ milliseconds are all accepted. Structured logs that name their own `service` kee
 ## Testing
 
 ```bash
-make test      # 117 unit tests
+make test      # 172 unit tests
 ```
 
 Covers golden log lines (valid, truncated, unicode garbage, embedded quotes, wrong format), geo
@@ -332,7 +423,9 @@ automatically; otherwise inference is used and labelled as such via `geo_source`
 ## Repository layout
 
 ```text
+ingest/       HTTP gateway: POST /v1/logs, /bulk, /raw (FR1.1)
 producer/     replay, scenario generation, rate limiting
+  sources/    live external feeds (Wikimedia EventStreams)
 processor/    parsers, enrichment, redaction, validation, DLQ routing, health
 common/       Kafka security config shared by both services
 schemas/      JSON Schema contracts
@@ -341,7 +434,7 @@ ksqldb/       windowed aggregates
 grafana/      provisioned datasources, dashboards, alert rules
 prometheus/   scrape config
 scripts/      setup, smoke tests, load test, production verification
-tests/        117 unit tests
+tests/        172 unit tests
 ```
 
 Run `make` with no arguments for the full command list.

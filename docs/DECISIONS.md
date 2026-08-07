@@ -223,6 +223,69 @@ over silent loss.
 
 ---
 
+## The ingest gateway defaults a missing timestamp instead of rejecting it
+
+**Decision:** a JSON log arriving over HTTP with no recognisable timestamp field is stamped with
+receipt time, and the substitution is counted in `logpipe_ingest_timestamp_defaulted_total`.
+
+The first version did not do this, and the very first `curl` example dead-lettered:
+
+```json
+{"error_reason": "no timestamp field (looked for timestamp, time, @timestamp, ts, eventTime)",
+ "error_stage": "parse"}
+```
+
+The pipeline was behaving correctly — but an ingestion API that silently drops logs from any client
+that forgets a field is hostile to the simplest possible use case. Receipt time is a defensible
+approximation for a log arriving over HTTP, and every major log API does the same.
+
+**Cost:** a client whose logs are delayed in transit gets receipt time rather than event time. The
+counter makes that measurable rather than invisible.
+
+**Not applied to `/v1/logs/raw`:** access-log lines carry their own timestamps, and a line without
+one is genuinely malformed.
+
+---
+
+## The gateway rejects at the boundary; the DLQ handles the rest
+
+**Decision:** malformed input to the HTTP gateway returns 4xx with a reason. It is not dead-lettered.
+
+These are different failure classes and deserve different handling. A client sending invalid JSON can
+*fix it* — telling them is more useful than silently absorbing it. An event that entered the pipeline
+and failed three stages later has no caller left to inform, which is exactly what the DLQ exists for.
+
+The one exception is `/v1/logs/raw`: the gateway does not parse, so it cannot judge those lines. They
+are forwarded and the processor dead-letters them with a stage and reason.
+
+**Cost:** a client that ignores HTTP status codes loses those events. That is the client's bug, and
+it is visible in `logpipe_ingest_rejected_total` by reason.
+
+---
+
+## Live external data comes from Wikimedia EventStreams
+
+**Decision:** the live-data demonstration uses <https://stream.wikimedia.org/v2/stream/recentchange>.
+
+It is a genuine real-time firehose with no API key, no rate limit worth worrying about, no expiring
+credentials, and it is always on — so a demo works on a laptop with no setup. Roughly 30–50 events
+per second across every Wikimedia wiki gives natural multi-service structure for dashboards.
+
+**What is mapped and what is not.** Someone else's schema becomes ours, and the temptation is to fill
+every field. `response_time_ms` is left **null** because the source has no latency field; inventing
+one would put fiction on a latency dashboard that is otherwise measuring something real.
+
+**The `client_ip` correction.** The mapping was first documented as carrying "a real public IP for
+anonymous edits". Measuring it disproved that: a 630-edit live sample contained 609 named accounts,
+21 masked temporary accounts (`~2026-43591-61`), and **zero IP addresses** — Wikimedia now masks
+anonymous editors. The field carries editor identity, geo resolution correctly reports `unresolved`,
+and the documentation was corrected rather than the claim being quietly dropped.
+
+**Cost:** near-zero error rate, so this source cannot exercise alerting. That remains the scenario
+generator's job, and the two are complementary: one proves live ingestion, the other proves alerting.
+
+---
+
 ## Deliberately not done
 
 | Item | Why | What it would take |

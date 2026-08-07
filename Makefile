@@ -16,6 +16,12 @@ help:  ## Show available targets
 	@echo "  make process  Run the stream processor (parse/enrich/DLQ)"
 	@echo "  make load     Max-rate load test (200k events)"
 	@echo ""
+	@echo "Real-time ingestion:"
+	@echo "  make ingest      HTTP gateway on :8100 (POST logs from anything)"
+	@echo "  make wiki        Live Wikimedia edit firehose -> Kafka"
+	@echo "  make wiki-http   Same, but routed through the HTTP gateway"
+	@echo "  make send        Send one example log to the gateway"
+	@echo ""
 	@echo "Demo:"
 	@echo "  make demo         Full end-to-end walkthrough (~6 min, needs 'make process')"
 	@echo "  make baseline     Healthy multi-service traffic (10 min)"
@@ -98,6 +104,21 @@ load:  ## Max-rate load test: 200k events as fast as the broker accepts them
 
 test:  ## Run the unit tests
 	python -m pytest tests -q
+
+ingest:  ## Start the HTTP ingest gateway on :8100 (FR1.1)
+	python -m ingest.main
+
+wiki:  ## Stream live Wikimedia edits straight into raw-logs
+	python -m producer.sources.wikipedia
+
+wiki-http:  ## Stream live Wikimedia edits through the HTTP gateway
+	python -m producer.sources.wikipedia --sink http
+
+send:  ## POST one example log to the gateway
+	@curl -s -X POST http://localhost:8100/v1/logs \
+		-H 'Content-Type: application/json' \
+		-d '{"service":"checkout-api","level":"ERROR","message":"payment gateway timeout","status_code":500,"path":"/checkout","http_method":"POST","response_time_ms":1840}'
+	@echo ""
 
 demo:  ## Full end-to-end walkthrough: healthy -> spike -> DLQ -> observability
 	powershell -ExecutionPolicy Bypass -File scripts/demo.ps1

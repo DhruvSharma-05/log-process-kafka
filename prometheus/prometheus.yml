@@ -33,6 +33,16 @@ scrape_configs:
     static_configs:
       - targets: ["host.docker.internal:8001"]
 
+  # HTTP ingest gateway (FR1.1) — accept/reject rates, backpressure, queue depth.
+  - job_name: ingest
+    static_configs:
+      - targets: ["host.docker.internal:8100"]
+
+  # Live external sources, e.g. the Wikimedia EventStreams consumer.
+  - job_name: live-sources
+    static_configs:
+      - targets: ["host.docker.internal:8002"]
+
   - job_name: prometheus
     static_configs:
       - targets: ["localhost:9090"]
