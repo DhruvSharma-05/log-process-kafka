@@ -797,6 +797,23 @@ now pins the behaviour. Worth noting because the claim was plausible, written co
 latency field, and fabricating one would put fiction on the one dashboard that is otherwise measuring
 something real.
 
+**⚠ Fixed — a UTF-8 BOM made the gateway look broken on Windows.** Piping a body into `curl.exe`
+from PowerShell prepends a BOM, and `json.loads` rejects it:
+
+```text
+{"accepted":0,"rejected":1,"errors":[{"line":1,"error":"invalid JSON: Unexpected UTF-8 BOM"}]}
+```
+
+The caller's shell encoding is not the caller's fault to debug. `_read_body` now strips a leading BOM
+on all three routes, with tests for each.
+
+**Documentation fix — the README's `curl` examples did not work in PowerShell.** `curl` there is an
+alias for `Invoke-WebRequest`, so `-H` binds to the `Headers` parameter and fails with a type error
+before any request is made. The README now carries verified PowerShell equivalents
+(`Invoke-RestMethod`, and `curl.exe --%` for real curl) alongside the bash forms. Worth noting on a
+project whose primary environment is Windows: the quickstart was untestable as written on the very
+machine it was developed on.
+
 Open items needing a human:
 
 - Eyeball both dashboards at <http://localhost:3000> and confirm the timeseries panels split per

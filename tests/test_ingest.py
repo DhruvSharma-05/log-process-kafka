@@ -212,6 +212,35 @@ def test_raw_rejects_an_unknown_source_format(client):
     assert client.post("/v1/logs/raw?source_format=syslog", content="x").status_code == 422
 
 
+# --- Encoding robustness -----------------------------------------------------
+
+
+def test_utf8_bom_is_stripped_from_json_bodies(client):
+    """PowerShell pipelines and several Windows tools prepend a BOM. json.loads
+    rejects it, which would make the gateway look broken on Windows."""
+    payload = json.dumps({"service": "a", "timestamp": "2026-08-07T07:00:00Z"}).encode()
+    response = client.post(
+        "/v1/logs",
+        content=b"\xef\xbb\xbf" + payload,
+        headers={"Content-Type": "application/json"},
+    )
+    assert response.status_code == 202
+    assert len(sent(client)) == 1
+
+
+def test_utf8_bom_is_stripped_from_bulk_bodies(client):
+    ndjson = json.dumps({"service": "a", "timestamp": "2026-08-07T07:00:00Z"}).encode()
+    response = client.post("/v1/logs/bulk", content=b"\xef\xbb\xbf" + ndjson)
+    assert response.json()["accepted"] == 1
+
+
+def test_utf8_bom_is_stripped_from_raw_bodies(client):
+    line = b'203.0.113.9 - - [07/Aug/2026:07:00:03 +0000] "GET / HTTP/1.1" 200 42'
+    response = client.post("/v1/logs/raw?service=x", content=b"\xef\xbb\xbf" + line)
+    assert response.json()["accepted"] == 1
+    assert not sent(client)[0]["raw_message"].startswith("﻿")
+
+
 # --- Backpressure ------------------------------------------------------------
 
 

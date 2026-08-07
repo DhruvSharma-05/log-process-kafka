@@ -133,6 +133,9 @@ def _publish(event: dict[str, object], route: str, source_format: str) -> None:
     ACCEPTED.labels(route=route, source_format=source_format).inc()
 
 
+UTF8_BOM = b"\xef\xbb\xbf"
+
+
 async def _read_body(request: Request, route: str) -> bytes:
     body = await request.body()
     if not body:
@@ -141,6 +144,12 @@ async def _read_body(request: Request, route: str) -> bytes:
     if len(body) > MAX_BODY_BYTES:
         REJECTED.labels(route=route, reason="too_large").inc()
         raise HTTPException(status_code=413, detail=f"body exceeds {MAX_BODY_BYTES} bytes")
+    # PowerShell pipelines, Notepad and several Windows tools prepend a UTF-8
+    # BOM. json.loads rejects it outright, which would make the gateway look
+    # broken to anyone piping data in on Windows. Strip it rather than blaming
+    # the caller for their shell's encoding.
+    if body.startswith(UTF8_BOM):
+        body = body[len(UTF8_BOM):]
     return body
 
 

@@ -157,6 +157,8 @@ downstream changes.
 make ingest        # gateway on :8100
 ```
 
+**bash / macOS / Linux:**
+
 ```bash
 # one JSON log
 curl -X POST localhost:8100/v1/logs -H 'Content-Type: application/json' \
@@ -171,6 +173,22 @@ curl -X POST localhost:8100/v1/logs/bulk --data-binary @logs.ndjson
 tail -f /var/log/nginx/access.log | \
   curl -X POST 'localhost:8100/v1/logs/raw?service=web' --data-binary @-
 ```
+
+**PowerShell** — `curl` is an *alias for `Invoke-WebRequest`*, so bash-style `-H`/`-d` flags fail
+with a parameter-binding error. Use the native cmdlet:
+
+```powershell
+$body = '{"service":"checkout-api","level":"ERROR","message":"payment timeout","status_code":500}'
+Invoke-RestMethod -Uri http://localhost:8100/v1/logs -Method Post -Body $body -ContentType 'application/json'
+
+# bulk from a file
+Invoke-RestMethod -Uri http://localhost:8100/v1/logs/bulk -Method Post -InFile logs.ndjson
+
+# or force real curl, with --% so PowerShell stops mangling the quotes
+curl.exe -s -X POST http://localhost:8100/v1/logs --% -H "Content-Type: application/json" -d "{\"service\":\"checkout-api\",\"status_code\":500}"
+```
+
+`make send` posts a working example on any platform.
 
 | Route | Body | Notes |
 | --- | --- | --- |
@@ -188,6 +206,8 @@ Behaviours worth knowing:
   events that entered the pipeline and failed later; a client sending bad JSON should be told.
 - **Backpressure returns `429` with `Retry-After`** once the local queue passes its high-water mark,
   instead of buffering without bound and lying to the caller.
+- **A leading UTF-8 BOM is stripped.** PowerShell pipelines and several Windows tools prepend one;
+  `json.loads` rejects it outright, which would make the gateway look broken for no good reason.
 - `/v1/logs/raw` does **not** parse. Unparseable lines are forwarded and the processor
   dead-letters them with a reason — which is what the DLQ is for.
 
