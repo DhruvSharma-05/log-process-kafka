@@ -17,6 +17,7 @@ help:  ## Show available targets
 	@echo "  make load     Max-rate load test (200k events)"
 	@echo ""
 	@echo "Demo:"
+	@echo "  make demo         Full end-to-end walkthrough (~6 min, needs 'make process')"
 	@echo "  make baseline     Healthy multi-service traffic (10 min)"
 	@echo "  make spike        Inject a 35% error spike on checkout-api (5 min)"
 	@echo "  make corrupt      Inject 5% unparseable lines (2 min)"
@@ -97,6 +98,9 @@ load:  ## Max-rate load test: 200k events as fast as the broker accepts them
 
 test:  ## Run the unit tests
 	python -m pytest tests -q
+
+demo:  ## Full end-to-end walkthrough: healthy -> spike -> DLQ -> observability
+	powershell -ExecutionPolicy Bypass -File scripts/demo.ps1
 
 baseline:  ## Healthy multi-service traffic for 10 minutes
 	python -m producer.scenarios --scenario baseline --rate 200 --duration 600

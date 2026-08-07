@@ -3,7 +3,8 @@
 Companion to `Kafka_Log_Processing_System_PRD.pdf` (v1.0). The PRD says *what* and *why*;
 this document says *what we build, in what order, with which tools*.
 
-**Status:** M0 – M6 complete (verified 2026-08-02) — M7 (documentation) is all that remains.
+**Status:** ✅ **All milestones M0 – M7 complete** (verified 2026-08-07). Every PRD success metric
+met and measured. Remaining open items are listed in §9.
 **Environment:** Windows 11 + Docker Desktop (WSL2 backend), Python 3.11+.
 
 ---
@@ -662,14 +663,37 @@ one laptop running the entire stack, not by the architecture.
 
 ---
 
-### M7 — Documentation
+### M7 — Documentation ✅ DONE
 
-- [ ] README: architecture diagram (Mermaid), 5-minute quickstart, per-service explanation
-- [ ] Runbook: consumer lag growing / DLQ filling / ClickHouse disk full / broker down
-- [ ] Design-decision log (why ClickHouse, why ksqlDB, why not Connect) — this is the part reviewers actually read
-- [ ] Screenshots or a short demo clip of the error-spike scenario end to end
+- [x] `README.md`: Mermaid architecture diagram, quickstart, component and topic tables, data model, honest-scope section
+- [x] `docs/RUNBOOK.md`: nine incident scenarios — lag, stuck processor, DLQ filling, latency, disk, broker down, alerts not delivering, empty dashboards, reset
+- [x] `docs/DECISIONS.md`: twelve decisions with cost and "would change if", plus a deliberately-not-done table
+- [x] `scripts/demo.ps1` — a four-act guided walkthrough, verified end to end
 
-**Exit:** A stranger can clone, run `make up && make seed`, and see live dashboards in under 10 minutes.
+**Exit:** ✅ `make up && make topics && make ch-init && make ksql-init && make data`, then
+`make process` + `make demo`. Every `make` target referenced in the docs was checked to exist.
+
+**The demo is verified, not just written.** Running it end to end caught two bugs in itself:
+
+1. **PowerShell here-strings broke the script.** Multi-line SQL in `@"..."@` failed to parse at all.
+   Rewritten as concatenated single-line strings; all three `.ps1` files are now syntax-checked with
+   `[Parser]::ParseFile`.
+2. **`kafka-console-consumer` exits non-zero on `--timeout-ms`**, which under
+   `$ErrorActionPreference='Stop'` aborted the demo two acts in. Topic reads are informational and
+   must never be fatal — wrapped in a helper that swallows the failure and reports "no messages".
+
+**Bonus verification — FR3.2 proved itself on real data.** M3 demonstrated tiered archival with
+synthetic rows dated 30 days back. Running the demo on 2026-08-07 showed the genuine pipeline data
+from 2026-07-30 had crossed the 7-day TTL and migrated on its own:
+
+```text
+partition 20260730   s3_cold   229,146 rows   15.81 MiB    <- on MinIO, unprompted
+partition 20260731   default   965,830 rows   61.94 MiB
+partition 20260807   default    50,708 rows    3.28 MiB
+```
+
+Latency in the same run: **p50 0.70 s, p95 1.23 s, p99 1.62 s** over 50,708 events — consistent with
+the M3 measurement across a week and a very different data mix.
 
 ---
 
@@ -711,14 +735,9 @@ real public IPs for demo purposes.
 
 ## 9. Next Action
 
-Start M7 — Documentation, the last milestone:
-
-1. `README.md`: architecture diagram (Mermaid), 5-minute quickstart, per-service explanation, and
-   the recorded throughput table from M6.
-2. Runbook: consumer lag growing / DLQ filling / ClickHouse disk full / broker down.
-3. Design-decision log — why ClickHouse over Elasticsearch, why ksqlDB, why no Kafka Connect, why
-   `service` stays the partition key despite the skew.
-4. Demo script or screenshots of the error-spike scenario end to end.
+**All milestones are complete.** The pipeline ingests, parses, enriches, redacts, stores, tiers,
+aggregates, visualises, alerts, and observes itself — with every PRD success metric measured rather
+than asserted, and 117 unit tests passing.
 
 Open items needing a human:
 
