@@ -29,7 +29,9 @@ from typing import Any
 
 import uvicorn
 from confluent_kafka import KafkaException, Producer
-from fastapi import FastAPI, HTTPException, Query, Request, Response
+from fastapi import FastAPI, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect, BackgroundTasks
+from fastapi.staticfiles import StaticFiles
+import os
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, generate_latest
 
 # Imported from the parser so the gateway and the processor can never disagree
@@ -182,12 +184,45 @@ def _envelope_from_json(payload: dict, route: str, service_hint: str | None, hos
     return event
 
 
+active_connections: list[WebSocket] = []
+
+
+async def broadcast_event(event: dict):
+    if not active_connections:
+        return
+    disconnected = []
+    message = json.dumps(event, separators=(",", ":"))
+    for connection in active_connections:
+        try:
+            await connection.send_text(message)
+        except Exception:
+            disconnected.append(connection)
+    for connection in disconnected:
+        if connection in active_connections:
+            active_connections.remove(connection)
+
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    active_connections.append(websocket)
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        pass
+    finally:
+        if websocket in active_connections:
+            active_connections.remove(websocket)
+
+
 # --- Routes ------------------------------------------------------------------
 
 
 @app.post("/v1/logs", status_code=202)
 async def ingest_one(
     request: Request,
+    background_tasks: BackgroundTasks,
     service: str | None = Query(None, description="Overrides the service named in the body"),
     host: str | None = Query(None, description="Overrides the host named in the body"),
 ):
@@ -206,12 +241,14 @@ async def ingest_one(
 
         event = _envelope_from_json(payload, "single", service, host)
         _publish(event, "single", "json_app")
+        background_tasks.add_task(broadcast_event, event)
         return {"accepted": 1, "event_id": event["event_id"], "service": event["service"]}
 
 
 @app.post("/v1/logs/bulk", status_code=202)
 async def ingest_bulk(
     request: Request,
+    background_tasks: BackgroundTasks,
     service: str | None = Query(None),
     host: str | None = Query(None),
 ):
@@ -263,6 +300,7 @@ async def ingest_bulk(
                 errors.append({"line": number, "error": exc.detail})
                 continue
             _publish(event, "bulk", "json_app")
+            background_tasks.add_task(broadcast_event, event)
             accepted += 1
 
         return {"accepted": accepted, "rejected": len(errors), "errors": errors[:20]}
@@ -271,6 +309,7 @@ async def ingest_bulk(
 @app.post("/v1/logs/raw", status_code=202)
 async def ingest_raw(
     request: Request,
+    background_tasks: BackgroundTasks,
     service: str | None = Query(None, description="Service name; derived from the path when absent"),
     host: str | None = Query(None),
     source_format: str = Query("nginx_combined", pattern="^(nginx_combined|json_app)$"),
@@ -301,6 +340,7 @@ async def ingest_raw(
             if event is None:
                 continue
             _publish(event, "raw", source_format)
+            background_tasks.add_task(broadcast_event, event)
             accepted += 1
 
         return {"accepted": accepted}
@@ -339,6 +379,13 @@ async def metrics():
     if producer is not None:
         QUEUE_DEPTH.set(len(producer))
     return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+
+static_dir = os.path.join(os.path.dirname(__file__), "static")
+if not os.path.exists(static_dir):
+    os.makedirs(static_dir)
+
+app.mount("/", StaticFiles(directory=static_dir, html=True), name="static")
 
 
 def main() -> int:
