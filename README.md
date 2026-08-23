@@ -46,7 +46,6 @@ flowchart LR
     GRAF[Grafana<br/>dashboards + alerts]
     PROM[Prometheus]
     KEXP[kafka-exporter]
-    SLACK[Slack]
 
     NASA --> PROD
     SCEN --> PROD
@@ -68,7 +67,7 @@ flowchart LR
     PROC -->|/metrics| PROM
     CH -->|:9363| PROM
     PROM --> GRAF
-    GRAF -->|error rate > 5%| SLACK
+    GRAF -->|error rate > 5%| ALERT[Alert fires<br/>visible in Grafana]
 ```
 
 Two design choices depart from the PRD's suggested architecture, both deliberate:

@@ -23,7 +23,7 @@ These resolve the PRD's Section 9 open questions and lock the "candidate tech" c
 | Hot storage | **ClickHouse** | Native Kafka table engine (no Connect needed), `ReplacingMergeTree` for FR2.5 dedupe, `TTL ... TO DISK` for FR3.2 archival, ~1–2 GB RAM. |
 | Cold storage | **MinIO** (S3-compatible) | Local, no cloud dependency (Portability NFR). |
 | Dashboards | **Grafana** + ClickHouse datasource plugin | One tool for logs, metrics, and alerts — no Kibana needed. |
-| Alerting | **Grafana Alerting** → Slack incoming webhook | FR4.2 / FR4.3. |
+| Alerting | **Grafana Alerting**, no delivery channel | FR4.2 only. FR4.3 deliberately unmet — see §M4. |
 | Pipeline observability | **Prometheus** + `kafka-exporter` + processor `/metrics` | FR5.1, Observability NFR. |
 
 **Dropped from the PRD:** Kafka Connect (ClickHouse consumes Kafka directly), Elasticsearch/Kibana,
@@ -42,7 +42,7 @@ and the `pipeline-metrics` Kafka topic — see §3.5.
                                                                           │
                                               ksqlDB ◄── [parsed-logs] ───┘
                                                  │
-                                                 └──► [service-metrics-1m] ──► ClickHouse ──► Grafana ──► Slack alert
+                                                 └──► [service-metrics-1m] ──► ClickHouse ──► Grafana ──► alert fires
 
   Prometheus ◄── kafka-exporter (lag) + processor:8000/metrics + clickhouse:9363
 ```
@@ -88,7 +88,7 @@ second storage path for data Grafana can read directly. The ksqlDB aggregate out
 log process/
 ├── docker-compose.yml            # dev: 1 broker, full stack
 ├── docker-compose.prod.yml       # M6: 3 brokers, RF=3, SASL/SSL profile
-├── .env.example
+├── docker-compose.prod.yml       # M6 production profile
 ├── Makefile                      # up / down / topics / seed / load / test
 ├── README.md                     # architecture diagram, setup, runbook (M7)
 ├── IMPLEMENTATION.md             # this file
@@ -426,7 +426,7 @@ FROM numbers(5000);
 - [x] ksqlDB stream over `parsed-logs`, 1-minute tumbling window → `service-metrics-1m` (FR2.4)
 - [x] `service-health.json`: 4 stat tiles + volume / error-rate / p95-latency timeseries + recent-errors table, service filter, time-range filterable (FR4.1)
 - [x] Grafana alert rule: error rate > 5 % over 5 min, `for: 1m`, min-sample guard (FR4.2)
-- [x] Slack contact point + notification policy + message templates (FR4.3)
+- [x] Notification policy and routing (FR4.3 delivery removed later — see below)
 - [x] 16 new unit tests covering the generator's error rates and parse-compatibility
 
 **Exit:** ✅ Alert fired on the injected spike, isolated to the correct service:
@@ -474,14 +474,58 @@ whose retention differs from what it expects. `WINDOW TUMBLING (... RETENTION 3 
 fix this — that governs the state store. The sink topic needs `RETENTION_MS` in the `WITH` clause,
 matching `scripts/create_topics.sh` exactly (259200000).
 
-**Slack delivery needs your webhook.** The rule fires, routes, and POSTs; with the placeholder URL
-Grafana logs `failed incoming webhook: no_team`. Put a real URL in `.env` as `SLACK_WEBHOOK_URL` and
-FR4.3 completes. Everything upstream of the Slack endpoint is verified working.
+**FR4.3 was later removed rather than left half-finished.** M4 originally shipped a Slack contact
+point, notification policy and message templates. Every leg was verified except the last: with a
+placeholder webhook URL Grafana logged `failed incoming webhook: no_team` on each fire, and
+completing it needed a live webhook that cannot be committed or exercised from a clone. Carrying
+config whose only working state depends on a secret nobody has looks finished and is not, so the
+whole Slack integration was deleted. Rule evaluation, thresholds, `for:` transitions and
+per-service isolation all still work and are observable via `make alerts` and the Grafana UI.
+See [docs/DECISIONS.md](docs/DECISIONS.md#no-external-alert-channel).
 
-**Not visually verified:** the dashboard's panel *rendering*. Provisioning, the datasource health
-check, and every panel query were confirmed via the Grafana API, but whether each timeseries panel
-draws one series per service (rather than a single merged series) depends on the ClickHouse plugin's
-long-to-wide handling and needs a human to look at <http://localhost:3000>.
+**⚠ RESOLVED LATER — the timeseries panels were in fact broken.** M4 shipped with this caveat:
+panel *rendering* was never verified, only that the queries returned rows. The suspicion was correct.
+
+The panels were set to `"format": 1`, which I had assumed meant "time series" in
+`grafana-clickhouse-datasource`. It does not. Querying `/api/ds/query` with each value and reading
+the returned frame schema settles it:
+
+```text
+format=0: 1 frame -> [time, requests, requests, requests]
+          labels={service: commons.wikimedia.org}, {service: en.wikipedia.org}, {service: fr.wikipedia.org}
+format=1: 1 frame -> [time, service, requests]      <- long format, raw string column, no labels
+format=2: 1 frame -> [time, service, requests]
+format=3: 1 frame -> [time, service, requests]
+```
+
+Only `format: 0` performs the long-to-wide conversion that produces one labelled series per service.
+With `format: 1` the panel receives a single frame carrying a string column and renders **one merged
+series** instead of one line per service — a silently wrong dashboard, from a query that returns
+perfectly correct data. No test could have caught it, because the SQL was never wrong.
+
+Fixed by setting `"format": 0` on the three timeseries panels. Verified against the real panel SQL:
+
+```text
+[PASS] Request volume per service       rows=61  series=5
+[PASS] Error rate % per service         rows=61  series=5
+[PASS] p95 response time per service    rows=7   series=5
+```
+
+**Not every panel wants `format: 0`.** The same experiment shows the table panel returns an *empty
+schema* under `format: 0` and its correct columns under `1`/`2`; stat panels behave identically under
+all values. So the fix is scoped to timeseries panels only:
+
+| Panel type | Correct format | Why |
+| --- | --- | --- |
+| timeseries | **0** | long-to-wide, one labelled series per group |
+| stat | 1 (unchanged) | single scalar; all formats behave the same |
+| table | 2 (unchanged) | `format: 0` strips the schema entirely |
+
+`pipeline-health.json` was never affected — it is entirely Prometheus, which returns labelled series
+natively and uses `legendFormat` templates (`{{consumergroup}}`, `{{stage}}`, `{{topic}}`).
+
+**The lesson worth keeping:** "the query returns correct rows" and "the panel draws the right thing"
+are different claims. The API check I ran in M4 only ever established the first.
 
 ---
 
@@ -722,7 +766,8 @@ real public IPs for demo purposes.
 | FR2.4 | M4 ksqlDB tumbling windows |
 | FR2.5 | M2 commit-after-produce + M3 `ReplacingMergeTree` on `event_id` |
 | FR3.1 / FR3.2 / FR3.3 | M3 ClickHouse + MinIO TTL + ordering key |
-| FR4.1 / FR4.2 / FR4.3 | M4 dashboard, alert rule, Slack webhook |
+| FR4.1 / FR4.2 | M4 dashboard, alert rule |
+| FR4.3 | **Not met** — no external delivery channel, by decision |
 | FR5.1 / FR5.2 / FR5.3 | M5 lag dashboard, Compose throughout, `health.py` |
 | Scalability / Fault tolerance / Durability | M6 |
 | Security (SASL/SSL) | M6 prod profile |
@@ -814,12 +859,6 @@ before any request is made. The README now carries verified PowerShell equivalen
 project whose primary environment is Windows: the quickstart was untestable as written on the very
 machine it was developed on.
 
-Open items needing a human:
-
-- Eyeball both dashboards at <http://localhost:3000> and confirm the timeseries panels split per
-  series rather than merging into one line.
-- Set a real `SLACK_WEBHOOK_URL` in `.env` to close FR4.3 end to end.
-
 Deliberately not done, and why:
 
 - **TLS** on the production profile — needs generated CA/keystore material; config delta documented.
@@ -827,3 +866,6 @@ Deliberately not done, and why:
   working config documented inline, separate hardening exercise.
 - **Composite partition key** to fix the load-distribution skew — would trade away the strict
   per-service ordering FR1.3 depends on. Documented as a tradeoff, not silently applied.
+- **FR4.3 external alert delivery** — the Slack integration was removed rather than left depending on
+  a secret nobody has. Alerts fire and are visible in Grafana; nothing is delivered. See
+  [docs/DECISIONS.md](docs/DECISIONS.md#no-external-alert-channel).

@@ -256,9 +256,13 @@ unavailability over silent data loss.
 
 ---
 
-## Alerts are not reaching Slack
+## An alert did not fire when it should have
 
-The rule can be firing correctly while delivery fails — check them separately.
+There is **no external notification channel configured** — no Slack, no email. Alerts evaluate and
+appear in the Grafana UI, and nothing is delivered anywhere. FR4.3 is deliberately unmet; see
+[DECISIONS.md](DECISIONS.md#no-external-alert-channel).
+
+So "I got no alert" is expected. The question is whether the rule *fired*.
 
 ### Is the rule firing?
 
@@ -266,22 +270,48 @@ The rule can be firing correctly while delivery fails — check them separately.
 make alerts
 ```
 
-Or Grafana → Alerting → Alert rules.
+Or Grafana -> Alerting -> Alert rules. States mean:
 
-### Is delivery working?
+| State | Meaning |
+| --- | --- |
+| `Normal` | Condition is false |
+| `Pending` | Condition is true but `for:` has not elapsed yet |
+| `Alerting` / `Firing` | Condition held for the full `for:` duration |
+| `NoData` | The query returned nothing - see below |
+| `Error` | The query failed |
 
-```bash
-docker compose logs grafana --since 10m | grep -i slack
+### It stays Normal during an obvious spike
+
+Check the rule's own query in isolation:
+
+```sql
+SELECT service, round(100 * countIf(is_error) / count(), 3) AS error_rate
+FROM logpipe.logs_hot
+WHERE timestamp > now() - INTERVAL 5 MINUTE
+GROUP BY service HAVING count() >= 20;
 ```
 
-`failed incoming webhook: no_team` means the placeholder URL is still in place. Put a real one in
-`.env`:
+Two things commonly explain a quiet rule:
 
-```bash
-SLACK_WEBHOOK_URL=https://hooks.slack.com/services/YOUR/REAL/URL
-```
+- **The `HAVING count() >= 20` guard.** A service with fewer than 20 requests in the window is
+  excluded on purpose, so a trickle of traffic with a high error percentage will not page. Lower the
+  rate or raise the volume.
+- **`for: 1m` plus a 30s evaluation interval.** The condition must hold across two consecutive
+  evaluations. A spike shorter than ~90 seconds can pass through as `Pending` and never reach
+  `Firing`.
 
-Then `docker compose up -d grafana`.
+### It shows NoData
+
+The rule queries `logpipe.logs_hot` directly. NoData means no rows in the last 5 minutes, so the
+problem is upstream, not in alerting - work through *Nothing appears on the dashboards* below.
+
+`noDataState: OK` is set deliberately: a service with no traffic is not a service in trouble.
+
+### If you want delivery
+
+Add a contact point in Grafana -> Alerting -> Contact points, or provision one by recreating
+`grafana/provisioning/alerting/contact-points.yml`. Grafana supports Slack, email, webhook, PagerDuty
+and others. Nothing else needs to change - the rules and notification policy already exist.
 
 ---
 

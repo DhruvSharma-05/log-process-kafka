@@ -186,7 +186,9 @@ services:
       start_period: 40s
 
   # ---------------------------------------------------------------------------
-  # Grafana — dashboards (FR4.1) and alerting (FR4.2, FR4.3).
+  # Grafana — dashboards (FR4.1) and alerting (FR4.2).
+  # No external notification channel is configured: alerts fire and are
+  # visible in the UI, but FR4.3 (delivery to Slack/email) is NOT met.
   # Everything is provisioned from files so the repo is self-serve; no
   # click-ops required to reproduce the dashboards.
   # ---------------------------------------------------------------------------
@@ -204,9 +206,6 @@ services:
       GF_USERS_DEFAULT_THEME: dark
       GF_INSTALL_PLUGINS: grafana-clickhouse-datasource
       GF_FEATURE_TOGGLES_ENABLE: alertingSimplifiedRouting
-      # Set this in .env to receive alerts in Slack (FR4.3). Without it the
-      # rule still fires and is visible in the UI; only delivery is skipped.
-      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-https://hooks.slack.com/services/REPLACE/WITH/YOURS}
     volumes:
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
       - ./grafana/dashboards:/var/lib/grafana/dashboards:ro

@@ -286,6 +286,33 @@ generator's job, and the two are complementary: one proves live ingestion, the o
 
 ---
 
+## No external alert channel
+
+**Decision:** alerts fire and are visible in Grafana, but are not delivered anywhere. There is no
+Slack, email, or webhook contact point.
+
+FR4.3 asks for delivery to at least one external channel. It is **not met**, deliberately.
+
+The earlier Slack integration was fully wired — contact point, notification policy, message
+templates — and every leg was verified except the last one: with a placeholder webhook URL, Grafana
+logged `failed incoming webhook: no_team` on each fire. Completing it required a live webhook from a
+real Slack workspace, which cannot be committed to a repo and cannot be exercised by anyone cloning
+it. Carrying configuration whose only working state depends on a secret nobody has is worse than
+carrying none: it looks finished and is not.
+
+**What still works:** rule evaluation, the >5% threshold, the `for: 1m` transition, per-service
+isolation, and routing to Grafana's default notification policy. The alert is observable via
+`make alerts`, the Grafana UI, and the Grafana API. Only the delivery hop is absent.
+
+**Cost:** nobody is paged. For a demonstration pipeline where a human is watching the dashboard, the
+alert *state* is the deliverable; in production the delivery hop is mandatory.
+
+**To add one:** Grafana -> Alerting -> Contact points, or re-create
+`grafana/provisioning/alerting/contact-points.yml`. The rules and notification policy already exist,
+so nothing else changes.
+
+---
+
 ## Deliberately not done
 
 | Item | Why | What it would take |
@@ -293,4 +320,5 @@ generator's job, and the two are complementary: one proves live ingestion, the o
 | **TLS on the production profile** | Needs generated CA and keystore material; SASL already proves client authentication | Generate a CA + per-broker keystores; switch `EXTERNAL` to `SASL_SSL`. Config delta documented in `docker-compose.prod.yml`; no code change |
 | **ACL authorization** | `StandardAuthorizer` deadlocks KRaft bootstrap — the controller's Raft `VOTE` requests are rejected with `AuthorizerNotReadyException` because ACLs live in a metadata log that needs a quorum, which needs authorization | Add `User:ANONYMOUS` to `super.users` for the internal PLAINTEXT listeners, then define per-topic ACLs. Working config documented inline |
 | **Composite partition key** | Would trade away the per-service ordering FR1.3 depends on | A product decision about ordering vs. even load distribution |
+| **External alert delivery (FR4.3)** | Requires a live webhook or SMTP credential that cannot be committed or exercised from a clone | Add a contact point in Grafana; rules and routing already exist |
 | **Distributed tracing, multi-region, ML anomaly detection, custom UI, multi-tenancy** | Explicit PRD non-goals (§1.4, §8) | — |
