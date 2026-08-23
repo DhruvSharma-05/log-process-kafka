@@ -29,7 +29,7 @@ from typing import Any
 
 import uvicorn
 from confluent_kafka import KafkaException, Producer
-from fastapi import FastAPI, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 import os
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, generate_latest
@@ -39,6 +39,8 @@ from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, ge
 from processor.parsers.json_app import TIMESTAMP_KEYS
 from producer.config import ProducerConfig
 from producer.replay import build_event
+
+from .live import LiveBroadcaster
 
 MAX_BODY_BYTES = 10 * 1024 * 1024   # 10 MB
 MAX_BULK_LINES = 10_000
@@ -62,6 +64,14 @@ REQUEST_SECONDS = Histogram(
     ["route"],
     buckets=(0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0),
 )
+
+# Live tail (the web UI at /). These exist so the lossiness is measurable:
+# the UI is a window onto the stream, not a delivery guarantee.
+WS_CONNECTED = Gauge("logpipe_ingest_ws_connected", "WebSocket viewers currently attached")
+WS_REJECTED = Counter("logpipe_ingest_ws_rejected_total", "Viewers refused because the cap was reached")
+LIVE_PUBLISHED = Gauge("logpipe_ingest_live_published_total", "Events offered to the live tail")
+LIVE_SAMPLED_OUT = Gauge("logpipe_ingest_live_sampled_out_total", "Events skipped by the live-tail rate cap")
+LIVE_DROPPED = Gauge("logpipe_ingest_live_dropped_total", "Events dropped from a slow viewer's queue")
 
 state: dict[str, Any] = {"producer": None, "config": None, "kafka_ok": False}
 
@@ -90,6 +100,7 @@ async def lifespan(app: FastAPI):
     print("  POST /v1/logs | /v1/logs/bulk | /v1/logs/raw")
     yield
 
+    await live.close()
     remaining = producer.flush(timeout=30)
     if remaining:
         print(f"WARNING: {remaining} message(s) unflushed at shutdown", file=sys.stderr)
@@ -184,36 +195,35 @@ def _envelope_from_json(payload: dict, route: str, service_hint: str | None, hos
     return event
 
 
-active_connections: list[WebSocket] = []
-
-
-async def broadcast_event(event: dict):
-    if not active_connections:
-        return
-    disconnected = []
-    message = json.dumps(event, separators=(",", ":"))
-    for connection in active_connections:
-        try:
-            await connection.send_text(message)
-        except Exception:
-            disconnected.append(connection)
-    for connection in disconnected:
-        if connection in active_connections:
-            active_connections.remove(connection)
+# Live tail for the web UI at `/`. Bounded and rate-capped so a viewer can
+# never slow ingestion down - see ingest/live.py for the measurements that
+# motivated it.
+live = LiveBroadcaster()
 
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
-    active_connections.append(websocket)
+    subscriber = live.add(websocket)
+    if subscriber is None:
+        # At capacity. Say so explicitly instead of accepting a connection that
+        # will never receive anything.
+        WS_REJECTED.inc()
+        await websocket.close(code=1013, reason="too many live viewers")
+        return
+
+    WS_CONNECTED.set(live.subscriber_count)
     try:
+        # The UI never sends anything; this just parks until it disconnects.
         while True:
             await websocket.receive_text()
     except WebSocketDisconnect:
         pass
+    except Exception:
+        pass
     finally:
-        if websocket in active_connections:
-            active_connections.remove(websocket)
+        await live.remove(subscriber)
+        WS_CONNECTED.set(live.subscriber_count)
 
 
 # --- Routes ------------------------------------------------------------------
@@ -222,7 +232,6 @@ async def websocket_endpoint(websocket: WebSocket):
 @app.post("/v1/logs", status_code=202)
 async def ingest_one(
     request: Request,
-    background_tasks: BackgroundTasks,
     service: str | None = Query(None, description="Overrides the service named in the body"),
     host: str | None = Query(None, description="Overrides the host named in the body"),
 ):
@@ -241,14 +250,13 @@ async def ingest_one(
 
         event = _envelope_from_json(payload, "single", service, host)
         _publish(event, "single", "json_app")
-        background_tasks.add_task(broadcast_event, event)
+        live.publish(event)
         return {"accepted": 1, "event_id": event["event_id"], "service": event["service"]}
 
 
 @app.post("/v1/logs/bulk", status_code=202)
 async def ingest_bulk(
     request: Request,
-    background_tasks: BackgroundTasks,
     service: str | None = Query(None),
     host: str | None = Query(None),
 ):
@@ -300,7 +308,7 @@ async def ingest_bulk(
                 errors.append({"line": number, "error": exc.detail})
                 continue
             _publish(event, "bulk", "json_app")
-            background_tasks.add_task(broadcast_event, event)
+            live.publish(event)
             accepted += 1
 
         return {"accepted": accepted, "rejected": len(errors), "errors": errors[:20]}
@@ -309,7 +317,6 @@ async def ingest_bulk(
 @app.post("/v1/logs/raw", status_code=202)
 async def ingest_raw(
     request: Request,
-    background_tasks: BackgroundTasks,
     service: str | None = Query(None, description="Service name; derived from the path when absent"),
     host: str | None = Query(None),
     source_format: str = Query("nginx_combined", pattern="^(nginx_combined|json_app)$"),
@@ -340,7 +347,7 @@ async def ingest_raw(
             if event is None:
                 continue
             _publish(event, "raw", source_format)
-            background_tasks.add_task(broadcast_event, event)
+            live.publish(event)
             accepted += 1
 
         return {"accepted": accepted}
@@ -378,6 +385,11 @@ async def metrics():
     producer: Producer = state["producer"]
     if producer is not None:
         QUEUE_DEPTH.set(len(producer))
+    stats = live.stats()
+    WS_CONNECTED.set(stats["subscribers"])
+    LIVE_PUBLISHED.set(stats["published"])
+    LIVE_SAMPLED_OUT.set(stats["sampled_out"])
+    LIVE_DROPPED.set(stats["dropped"])
     return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 

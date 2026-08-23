@@ -281,3 +281,60 @@ def test_readyz_is_ready_when_healthy(client):
 def test_metrics_endpoint_exposes_prometheus_text(client):
     body = client.get("/metrics").text
     assert "logpipe_ingest_accepted_total" in body
+
+
+# --- WebSocket live tail -----------------------------------------------------
+
+
+def test_websocket_receives_ingested_events(client):
+    """The /ws endpoint is what the web UI at / consumes."""
+    with client.websocket_connect("/ws") as ws:
+        client.post("/v1/logs", json={
+            "service": "checkout-api", "level": "ERROR", "message": "boom",
+            "timestamp": "2026-08-23T06:00:00Z",
+        })
+        received = ws.receive_json()
+    assert received["service"] == "checkout-api"
+    assert "raw_message" in received
+
+
+def test_websocket_receives_bulk_events(client):
+    with client.websocket_connect("/ws") as ws:
+        ndjson = "\n".join(
+            json.dumps({"service": "a", "seq": i, "timestamp": "2026-08-23T06:00:00Z"})
+            for i in range(3)
+        )
+        client.post("/v1/logs/bulk", content=ndjson)
+        seen = [ws.receive_json() for _ in range(3)]
+    assert len(seen) == 3
+
+
+def test_websocket_receives_raw_events(client):
+    line = '203.0.113.9 - - [23/Aug/2026:06:00:00 +0000] "GET / HTTP/1.1" 200 42'
+    with client.websocket_connect("/ws") as ws:
+        client.post("/v1/logs/raw?service=web", content=line)
+        received = ws.receive_json()
+    assert received["service"] == "web"
+
+
+def test_ingestion_works_with_no_viewers_attached(client):
+    """Nothing about the live tail may be load-bearing for ingestion."""
+    response = client.post("/v1/logs", json={"service": "a", "timestamp": "2026-08-23T06:00:00Z"})
+    assert response.status_code == 202
+    assert len(sent(client)) == 1
+
+
+def test_viewer_disconnect_is_cleaned_up(client):
+    import ingest.main as gateway_module
+    with client.websocket_connect("/ws"):
+        pass
+    client.post("/v1/logs", json={"service": "a", "timestamp": "2026-08-23T06:00:00Z"})
+    assert gateway_module.live.subscriber_count == 0
+
+
+def test_live_tail_stats_are_exposed_on_metrics(client):
+    body = client.get("/metrics").text
+    for metric in ("logpipe_ingest_ws_connected",
+                   "logpipe_ingest_live_dropped_total",
+                   "logpipe_ingest_live_sampled_out_total"):
+        assert metric in body

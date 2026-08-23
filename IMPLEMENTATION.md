@@ -778,6 +778,83 @@ real public IPs for demo purposes.
 
 ---
 
+## M9 — Live tail UI: backpressure and tests (post-PRD) ✅ DONE
+
+The web UI at `http://localhost:8100/` and its WebSocket broadcast arrived outside the milestone
+plan. It had **1,209 lines of frontend, zero tests, no documentation**, and a fan-out design that had
+never been measured. This milestone measured it, fixed it, tested it and documented it.
+
+**Scope, stated plainly:** the PRD lists a custom UI as an explicit non-goal (§1.4) and future work
+(§8). It is kept as a demonstration surface — Grafana shows aggregates on a refresh interval, this
+shows individual events as they land — and is now documented as an extension rather than sitting in
+the repo unexplained. See [docs/DECISIONS.md](docs/DECISIONS.md#live-tail).
+
+### What measurement found
+
+The naive broadcast fired one `background_tasks.add_task` per ingested event, wrote directly to every
+socket, kept an unbounded connection list, and swallowed every exception:
+
+| | naive | bounded |
+| --- | --- | --- |
+| ingest, no viewers | 10,655/s | 12,513/s |
+| ingest, 3 idle viewers | 4,960/s (−53%) | **12,948/s (0%)** |
+| ingest, 3 fast viewers | 4,297/s (−60%) | **9,190/s (−27%)** |
+| ingest, 3 slow viewers | 4,632/s (−57%) | **10,359/s (−17%)** |
+| RSS, 40k events, 1 stalled viewer | 68 → 96 MB, never reclaimed | 67 → 68 MB |
+
+Merely *attaching* three idle viewers halved ingest throughput. Memory grew ~28 MB per 40k events for
+a viewer that never read, and was still held after it disconnected.
+
+### The fix
+
+`ingest/live.py` — `publish()` serialises once and does `put_nowait` into a bounded queue per
+connection; a task per connection drains it. The ingest path never awaits a socket. Queues hold 256
+and evict the **oldest** (a live tail should show the newest line). Broadcast is rate-capped at
+200/s. Viewers are capped at 32 and refused with close code 1013. Everything discarded is counted.
+
+### Tests
+
+**20 new tests** (`tests/test_live.py` 14, `tests/test_ingest.py` +6), covering the properties that
+make the design safe rather than its implementation details: publish never blocks on a stalled
+viewer, queues stay bounded, overflow evicts oldest, the rate cap holds and refills, the viewer cap
+is enforced, a failing viewer does not affect others, disconnect releases the backlog, and the
+`/ws` endpoint delivers events from all three ingest routes.
+
+Suite: **175 → 195 passing.**
+
+### ⚠ Two measurement errors made along the way
+
+Both are worth recording because each produced a confident, wrong number.
+
+**1. Windows `localhost` resolution, not the gateway.** The first benchmark reported ~240 events/sec
+and a flat ~2,060 ms per request regardless of batch size. That fixed cost was `urllib` resolving
+`localhost`:
+
+```text
+urllib -> localhost    2,051 ms
+urllib -> 127.0.0.1        1.6 ms      <- 1,280x
+curl   -> localhost      208 ms
+curl   -> 127.0.0.1        2.1 ms
+```
+
+`GET /healthz`, which does nothing, was equally "slow". The gateway was never the bottleneck; every
+number in that run was client-side DNS. Benchmarks now target `127.0.0.1`.
+
+**2. Measuring the old code after deploying the fix.** The first post-fix run showed throughput
+*worse* than before. `pkill -f ingest.main` from Git Bash does not kill Windows processes, so the
+stale gateway was still serving :8100 and every "after" number came from the unfixed build. Confirmed
+by the absence of the new `logpipe_ingest_live_*` metrics in `/metrics` — a metric that should exist
+and does not is a reliable signal that the running binary is not the one you just built.
+
+### One cost that remains
+
+Actively-reading viewers still cost 17–27% of peak ingest throughput, because uvicorn services those
+WebSocket connections on the same event loop as the HTTP routes. Bounded queues cannot remove that;
+only moving the tail to its own process would, at the cost of another service. Not worth it for a
+demonstration surface, and now documented rather than discovered later.
+
+---
+
 ## 9. Next Action
 
 **All milestones are complete.** The pipeline ingests, parses, enriches, redacts, stores, tiers,

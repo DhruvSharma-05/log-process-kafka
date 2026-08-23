@@ -313,6 +313,72 @@ so nothing else changes.
 
 ---
 
+## The live web UI is a deliberate scope extension
+
+**Decision:** keep the custom web UI at `http://localhost:8100/`, and document it as an addition
+beyond the PRD rather than as a requirement it satisfies.
+
+The PRD lists "Building a custom UI — v1 uses existing tools (Kibana/Grafana) rather than a bespoke
+frontend" as an explicit **non-goal** (§1.4), and repeats "Custom-built web UI instead of
+Kibana/Grafana" under future work (§8). The UI is therefore out of scope as written.
+
+It earns its place anyway, for one reason Grafana cannot cover: **Grafana shows aggregates on a
+refresh interval; this shows individual events as they arrive.** Watching a log line appear the
+instant it is POSTed is what makes the pipeline legible to someone seeing it for the first time. It
+is a demonstration surface, not an operations tool.
+
+**What it is not:** it does not replace the Grafana dashboards, it has no query capability, no time
+range, and no persistence. FR4.1 is still satisfied by Grafana, not by this.
+
+**Cost:** ~1,200 lines of HTML/CSS/JS that the PRD did not ask for, plus a WebSocket path on the
+ingest gateway that had to be given real backpressure (below).
+
+---
+
+## The live tail drops events on purpose {#live-tail}
+
+**Decision:** the WebSocket feed is lossy by design — rate-capped, bounded per viewer, and dropping
+the oldest queued message under pressure.
+
+Kafka is the durable path. The UI is a window onto it. Once that is settled, dropping is obviously
+correct: a viewer that cannot keep up should miss lines, not slow down ingestion or consume unbounded
+memory.
+
+The first implementation did neither. It fired one `background_tasks.add_task` per ingested event,
+wrote directly to every socket, held an unbounded connection list, and swallowed every exception.
+Measured:
+
+| | naive | bounded |
+| --- | --- | --- |
+| ingest, no viewers | 10,655/s | 12,513/s |
+| ingest, 3 idle viewers | 4,960/s (−53%) | **12,948/s (0%)** |
+| ingest, 3 fast viewers | 4,297/s (−60%) | **9,190/s (−27%)** |
+| ingest, 3 slow viewers | 4,632/s (−57%) | **10,359/s (−17%)** |
+| RSS, 40k events, 1 stalled viewer | 68 → 96 MB, never reclaimed | 67 → 68 MB |
+
+The design that produces the right-hand column:
+
+- **`publish()` never touches a socket.** It serialises once and does `put_nowait` into a bounded
+  queue per connection. A task per connection drains that queue. The ingest path cannot await a
+  browser.
+- **Queues are bounded (256) and evict the oldest.** On a live tail the newest line is the
+  interesting one; showing a viewer a stale backlog is worse than showing gaps.
+- **The broadcast is rate-capped (200/s).** A browser cannot render 12,000 lines a second and nobody
+  can read them. Above the cap events are sampled out.
+- **Viewers are capped (32)** and refused with WebSocket close code 1013 rather than accepted into a
+  connection that will never receive anything.
+
+Everything discarded is counted — `logpipe_ingest_live_sampled_out_total`,
+`logpipe_ingest_live_dropped_total`, `logpipe_ingest_ws_rejected_total` — so the lossiness is
+measurable rather than assumed.
+
+**Cost that remains:** holding WebSocket connections still costs throughput when viewers are
+actively reading (−17% to −27%), because uvicorn services those connections on the same event loop.
+That is inherent to serving a live feed from the ingest process; moving the tail to a separate
+process would remove it, at the cost of another service. Not worth it for a demonstration surface.
+
+---
+
 ## Deliberately not done
 
 | Item | Why | What it would take |
