@@ -2,24 +2,36 @@
   "uid": "logpipe-service-health",
   "title": "Service Health",
   "description": "FR4.1 — request volume, error rate and latency per service, filterable by time range.",
-  "tags": ["logpipe", "fr4.1"],
+  "tags": [
+    "logpipe",
+    "fr4.1"
+  ],
   "timezone": "browser",
   "schemaVersion": 39,
   "version": 1,
   "refresh": "10s",
-  "time": { "from": "now-1h", "to": "now" },
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
   "templating": {
     "list": [
       {
         "name": "service",
         "label": "Service",
         "type": "query",
-        "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse" },
+        "datasource": {
+          "type": "grafana-clickhouse-datasource",
+          "uid": "clickhouse"
+        },
         "query": "SELECT DISTINCT service FROM logpipe.logs_hot WHERE timestamp > now() - INTERVAL 24 HOUR ORDER BY service",
         "refresh": 2,
         "includeAll": true,
         "multi": true,
-        "current": { "text": "All", "value": "$__all" }
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        }
       }
     ]
   },
@@ -28,8 +40,16 @@
       "id": 1,
       "type": "stat",
       "title": "Events stored (selected range)",
-      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
-      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse" },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 0
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse"
+      },
       "targets": [
         {
           "refId": "A",
@@ -38,15 +58,36 @@
           "rawSql": "SELECT count() AS events FROM logpipe.logs_hot WHERE $__timeFilter(timestamp) AND service IN (${service:sqlstring})"
         }
       ],
-      "options": { "colorMode": "value", "graphMode": "none", "textMode": "value" },
-      "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "fixed", "fixedColor": "text" } }, "overrides": [] }
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "text"
+          }
+        },
+        "overrides": []
+      }
     },
     {
       "id": 2,
       "type": "stat",
       "title": "Error rate",
-      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
-      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse" },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 0
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse"
+      },
       "targets": [
         {
           "refId": "A",
@@ -55,7 +96,11 @@
           "rawSql": "SELECT round(100 * countIf(is_error) / greatest(count(), 1), 2) AS error_rate FROM logpipe.logs_hot WHERE $__timeFilter(timestamp) AND service IN (${service:sqlstring})"
         }
       ],
-      "options": { "colorMode": "background", "graphMode": "none", "textMode": "value" },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value"
+      },
       "fieldConfig": {
         "defaults": {
           "unit": "percent",
@@ -63,9 +108,18 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": null },
-              { "color": "yellow", "value": 1 },
-              { "color": "red", "value": 5 }
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 5
+              }
             ]
           }
         },
@@ -76,8 +130,16 @@
       "id": 3,
       "type": "stat",
       "title": "p95 response time",
-      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
-      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse" },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 0
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse"
+      },
       "targets": [
         {
           "refId": "A",
@@ -86,16 +148,33 @@
           "rawSql": "SELECT round(quantile(0.95)(response_time_ms)) AS p95_ms FROM logpipe.logs_hot WHERE $__timeFilter(timestamp) AND service IN (${service:sqlstring})"
         }
       ],
-      "options": { "colorMode": "value", "graphMode": "none", "textMode": "value" },
-      "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] }
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      }
     },
     {
       "id": 4,
       "type": "stat",
       "title": "Active services",
       "description": "Distinct services reporting in the selected range. Dead-letter counts live in the Kafka DLQ topic, not ClickHouse — see the pipeline-health dashboard (M5).",
-      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
-      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse" },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 0
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse"
+      },
       "targets": [
         {
           "refId": "A",
@@ -104,43 +183,82 @@
           "rawSql": "SELECT uniqExact(service) AS services FROM logpipe.logs_hot WHERE $__timeFilter(timestamp)"
         }
       ],
-      "options": { "colorMode": "value", "graphMode": "none", "textMode": "value" },
-      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
     },
     {
       "id": 5,
       "type": "timeseries",
       "title": "Request volume per service",
-      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 4 },
-      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse" },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 4
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse"
+      },
       "targets": [
         {
           "refId": "A",
           "editorType": "sql",
-          "format": 1,
+          "format": 0,
           "rawSql": "SELECT $__timeInterval(timestamp) AS time, service, count() AS requests FROM logpipe.logs_hot WHERE $__timeFilter(timestamp) AND service IN (${service:sqlstring}) GROUP BY time, service ORDER BY time"
         }
       ],
       "fieldConfig": {
         "defaults": {
           "unit": "short",
-          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 10, "showPoints": "never" }
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
         },
         "overrides": []
       },
-      "options": { "legend": { "displayMode": "table", "placement": "right", "calcs": ["mean", "max"] } }
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "mean",
+            "max"
+          ]
+        }
+      }
     },
     {
       "id": 6,
       "type": "timeseries",
       "title": "Error rate % per service (FR4.2 threshold at 5%)",
-      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 4 },
-      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse" },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 4
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse"
+      },
       "targets": [
         {
           "refId": "A",
           "editorType": "sql",
-          "format": 1,
+          "format": 0,
           "rawSql": "SELECT $__timeInterval(timestamp) AS time, service, round(100 * countIf(is_error) / count(), 3) AS error_rate FROM logpipe.logs_hot WHERE $__timeFilter(timestamp) AND service IN (${service:sqlstring}) GROUP BY time, service ORDER BY time"
         }
       ],
@@ -153,49 +271,95 @@
             "lineWidth": 2,
             "fillOpacity": 5,
             "showPoints": "never",
-            "thresholdsStyle": { "mode": "line" }
+            "thresholdsStyle": {
+              "mode": "line"
+            }
           },
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": null },
-              { "color": "red", "value": 5 }
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 5
+              }
             ]
           }
         },
         "overrides": []
       },
-      "options": { "legend": { "displayMode": "table", "placement": "right", "calcs": ["max"] } }
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "max"
+          ]
+        }
+      }
     },
     {
       "id": 7,
       "type": "timeseries",
       "title": "p95 response time per service",
-      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 13 },
-      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse" },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 13
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse"
+      },
       "targets": [
         {
           "refId": "A",
           "editorType": "sql",
-          "format": 1,
+          "format": 0,
           "rawSql": "SELECT $__timeInterval(timestamp) AS time, service, round(quantile(0.95)(response_time_ms)) AS p95_ms FROM logpipe.logs_hot WHERE $__timeFilter(timestamp) AND service IN (${service:sqlstring}) AND response_time_ms IS NOT NULL GROUP BY time, service ORDER BY time"
         }
       ],
       "fieldConfig": {
         "defaults": {
           "unit": "ms",
-          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 0, "showPoints": "never" }
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 0,
+            "showPoints": "never"
+          }
         },
         "overrides": []
       },
-      "options": { "legend": { "displayMode": "table", "placement": "right", "calcs": ["mean", "max"] } }
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "mean",
+            "max"
+          ]
+        }
+      }
     },
     {
       "id": 8,
       "type": "table",
       "title": "Recent errors",
-      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 13 },
-      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse" },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 13
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse"
+      },
       "targets": [
         {
           "refId": "A",
@@ -204,8 +368,13 @@
           "rawSql": "SELECT timestamp, service, status_code, http_method, path, response_time_ms, geo_country FROM logpipe.logs_hot WHERE $__timeFilter(timestamp) AND service IN (${service:sqlstring}) AND is_error ORDER BY timestamp DESC LIMIT 100"
         }
       ],
-      "options": { "showHeader": true },
-      "fieldConfig": { "defaults": {}, "overrides": [] }
+      "options": {
+        "showHeader": true
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
     }
   ]
 }

@@ -33,6 +33,7 @@ flowchart LR
     end
 
     GATE[ingest gateway :8100<br/>POST /v1/logs · /bulk · /raw]
+    UI[live tail UI :8100<br/>WebSocket, rate-capped]
     PROD[producer<br/>Python]
     RAW[(raw-logs<br/>6 partitions, 24h)]
     PROC[processor<br/>parse · enrich · redact · validate]
@@ -46,7 +47,6 @@ flowchart LR
     GRAF[Grafana<br/>dashboards + alerts]
     PROM[Prometheus]
     KEXP[kafka-exporter]
-    SLACK[Slack]
 
     NASA --> PROD
     SCEN --> PROD
@@ -55,6 +55,7 @@ flowchart LR
     WIKI --> PROD
     WIKI -.->|--sink http| GATE
     GATE -->|key = service| RAW
+    GATE -.->|live tail, lossy| UI
     PROD -->|key = service| RAW
     RAW --> PROC
     PROC --> PARSED
@@ -68,7 +69,7 @@ flowchart LR
     PROC -->|/metrics| PROM
     CH -->|:9363| PROM
     PROM --> GRAF
-    GRAF -->|error rate > 5%| SLACK
+    GRAF -->|error rate > 5%| ALERT[Alert fires<br/>visible in Grafana]
 ```
 
 Two design choices depart from the PRD's suggested architecture, both deliberate:
@@ -108,6 +109,7 @@ Open **<http://localhost:3000>** (admin/admin) → Dashboards → Logpipe.
 | What | Where |
 | --- | --- |
 | Dashboards and alerts | <http://localhost:3000> (admin/admin) |
+| Live log tail (web UI) | <http://localhost:8100> — after `make ingest` |
 | Kafka topics and messages | <http://localhost:8080> |
 | SQL console | <http://localhost:8123/play> |
 | Prometheus | <http://localhost:9090> |
@@ -210,6 +212,47 @@ Behaviours worth knowing:
   `json.loads` rejects it outright, which would make the gateway look broken for no good reason.
 - `/v1/logs/raw` does **not** parse. Unparseable lines are forwarded and the processor
   dead-letters them with a reason — which is what the DLQ is for.
+
+### Live tail UI
+
+The gateway also serves a small web UI at **<http://localhost:8100>** that streams every ingested
+event to the browser over a WebSocket (`/ws`). Start the gateway with `make ingest`, open it, and
+POST a log — the line appears immediately.
+
+This is **beyond the PRD**, which lists a custom UI as an explicit non-goal (§1.4). It exists because
+Grafana shows aggregates on a refresh interval, and watching individual events arrive is what makes
+the pipeline legible the first time you see it. Grafana remains the operations surface; this is a
+demonstration surface. See [`docs/DECISIONS.md`](docs/DECISIONS.md#live-tail).
+
+**It is a tail, not a feed you can trust for completeness.** Kafka is the durable path; the UI drops
+events rather than slowing ingestion down:
+
+| Guard | Behaviour |
+| --- | --- |
+| Rate cap | 200 events/sec to the browser; the rest are sampled out |
+| Per-viewer queue | 256 messages, evicting the **oldest** — a live tail should show the newest line |
+| Viewer cap | 32 connections, then refused with WebSocket close 1013 |
+| Ingest path | `publish()` never awaits a socket, so a stalled browser cannot block a POST |
+
+Everything discarded is counted, so the lossiness is visible rather than assumed:
+
+```bash
+curl -s localhost:8100/metrics | grep logpipe_ingest_live
+# logpipe_ingest_live_published_total    841
+# logpipe_ingest_live_sampled_out_total  14159
+# logpipe_ingest_live_dropped_total      0
+```
+
+Measured cost of the guards, against the naive version that wrote straight to each socket:
+
+```text
+                              naive          bounded
+ingest, no viewers            10,655/s       12,513/s
+ingest, 3 idle viewers         4,960/s        12,948/s   (-53%  ->  0%)
+ingest, 3 slow viewers         4,632/s        10,359/s   (-57%  -> -17%)
+RSS, 40k events, stalled       68 -> 96 MB    67 -> 68 MB
+  viewer                       never reclaimed
+```
 
 ### 2. Live external firehose — Wikimedia EventStreams
 
@@ -370,7 +413,7 @@ milliseconds are all accepted. Structured logs that name their own `service` kee
 ## Testing
 
 ```bash
-make test      # 172 unit tests
+make test      # 195 unit tests
 ```
 
 Covers golden log lines (valid, truncated, unicode garbage, embedded quotes, wrong format), geo
@@ -444,6 +487,8 @@ automatically; otherwise inference is used and labelled as such via `geo_source`
 
 ```text
 ingest/       HTTP gateway: POST /v1/logs, /bulk, /raw (FR1.1)
+  live.py     bounded, rate-capped WebSocket fan-out for the UI
+  static/     live tail web UI (beyond PRD scope - see DECISIONS)
 producer/     replay, scenario generation, rate limiting
   sources/    live external feeds (Wikimedia EventStreams)
 processor/    parsers, enrichment, redaction, validation, DLQ routing, health
@@ -454,7 +499,7 @@ ksqldb/       windowed aggregates
 grafana/      provisioned datasources, dashboards, alert rules
 prometheus/   scrape config
 scripts/      setup, smoke tests, load test, production verification
-tests/        172 unit tests
+tests/        195 unit tests
 ```
 
 Run `make` with no arguments for the full command list.

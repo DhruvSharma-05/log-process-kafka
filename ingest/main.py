@@ -29,7 +29,9 @@ from typing import Any
 
 import uvicorn
 from confluent_kafka import KafkaException, Producer
-from fastapi import FastAPI, HTTPException, Query, Request, Response
+from fastapi import FastAPI, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect
+from fastapi.staticfiles import StaticFiles
+import os
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, generate_latest
 
 # Imported from the parser so the gateway and the processor can never disagree
@@ -37,6 +39,8 @@ from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, ge
 from processor.parsers.json_app import TIMESTAMP_KEYS
 from producer.config import ProducerConfig
 from producer.replay import build_event
+
+from .live import LiveBroadcaster
 
 MAX_BODY_BYTES = 10 * 1024 * 1024   # 10 MB
 MAX_BULK_LINES = 10_000
@@ -60,6 +64,14 @@ REQUEST_SECONDS = Histogram(
     ["route"],
     buckets=(0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0),
 )
+
+# Live tail (the web UI at /). These exist so the lossiness is measurable:
+# the UI is a window onto the stream, not a delivery guarantee.
+WS_CONNECTED = Gauge("logpipe_ingest_ws_connected", "WebSocket viewers currently attached")
+WS_REJECTED = Counter("logpipe_ingest_ws_rejected_total", "Viewers refused because the cap was reached")
+LIVE_PUBLISHED = Gauge("logpipe_ingest_live_published_total", "Events offered to the live tail")
+LIVE_SAMPLED_OUT = Gauge("logpipe_ingest_live_sampled_out_total", "Events skipped by the live-tail rate cap")
+LIVE_DROPPED = Gauge("logpipe_ingest_live_dropped_total", "Events dropped from a slow viewer's queue")
 
 state: dict[str, Any] = {"producer": None, "config": None, "kafka_ok": False}
 
@@ -88,6 +100,7 @@ async def lifespan(app: FastAPI):
     print("  POST /v1/logs | /v1/logs/bulk | /v1/logs/raw")
     yield
 
+    await live.close()
     remaining = producer.flush(timeout=30)
     if remaining:
         print(f"WARNING: {remaining} message(s) unflushed at shutdown", file=sys.stderr)
@@ -182,6 +195,37 @@ def _envelope_from_json(payload: dict, route: str, service_hint: str | None, hos
     return event
 
 
+# Live tail for the web UI at `/`. Bounded and rate-capped so a viewer can
+# never slow ingestion down - see ingest/live.py for the measurements that
+# motivated it.
+live = LiveBroadcaster()
+
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    subscriber = live.add(websocket)
+    if subscriber is None:
+        # At capacity. Say so explicitly instead of accepting a connection that
+        # will never receive anything.
+        WS_REJECTED.inc()
+        await websocket.close(code=1013, reason="too many live viewers")
+        return
+
+    WS_CONNECTED.set(live.subscriber_count)
+    try:
+        # The UI never sends anything; this just parks until it disconnects.
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        pass
+    finally:
+        await live.remove(subscriber)
+        WS_CONNECTED.set(live.subscriber_count)
+
+
 # --- Routes ------------------------------------------------------------------
 
 
@@ -206,6 +250,7 @@ async def ingest_one(
 
         event = _envelope_from_json(payload, "single", service, host)
         _publish(event, "single", "json_app")
+        live.publish(event)
         return {"accepted": 1, "event_id": event["event_id"], "service": event["service"]}
 
 
@@ -263,6 +308,7 @@ async def ingest_bulk(
                 errors.append({"line": number, "error": exc.detail})
                 continue
             _publish(event, "bulk", "json_app")
+            live.publish(event)
             accepted += 1
 
         return {"accepted": accepted, "rejected": len(errors), "errors": errors[:20]}
@@ -301,6 +347,7 @@ async def ingest_raw(
             if event is None:
                 continue
             _publish(event, "raw", source_format)
+            live.publish(event)
             accepted += 1
 
         return {"accepted": accepted}
@@ -338,7 +385,19 @@ async def metrics():
     producer: Producer = state["producer"]
     if producer is not None:
         QUEUE_DEPTH.set(len(producer))
+    stats = live.stats()
+    WS_CONNECTED.set(stats["subscribers"])
+    LIVE_PUBLISHED.set(stats["published"])
+    LIVE_SAMPLED_OUT.set(stats["sampled_out"])
+    LIVE_DROPPED.set(stats["dropped"])
     return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+
+static_dir = os.path.join(os.path.dirname(__file__), "static")
+if not os.path.exists(static_dir):
+    os.makedirs(static_dir)
+
+app.mount("/", StaticFiles(directory=static_dir, html=True), name="static")
 
 
 def main() -> int:

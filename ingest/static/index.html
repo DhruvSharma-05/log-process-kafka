@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Logpipe - Live Ingestion Visualizer</title>
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&family=Space+Mono&display=swap" rel="stylesheet">
+    <!-- FontAwesome Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- Custom CSS -->
+    <link rel="stylesheet" href="index.css">
+</head>
+<body>
+    <div class="glass-bg"></div>
+    <div class="app-container">
+        <!-- Header -->
+        <header class="app-header">
+            <div class="title-area">
+                <i class="fa-solid fa-circle-nodes logo-icon"></i>
+                <div>
+                    <h1>Logpipe Live Dashboard</h1>
+                    <p class="subtitle">Real-time Kafka ingestion and parsing pipeline visualizer</p>
+                </div>
+            </div>
+            <div class="status-badge" id="ws-status">
+                <span class="status-dot pulsing"></span>
+                <span class="status-text">Connecting</span>
+            </div>
+        </header>
+
+        <!-- Metrics Grid -->
+        <section class="metrics-grid">
+            <div class="metric-card" id="metric-throughput">
+                <div class="card-icon cyan"><i class="fa-solid fa-gauge-high"></i></div>
+                <div class="card-content">
+                    <span class="metric-label">Throughput</span>
+                    <h2 class="metric-value">0 <span class="unit">evt/s</span></h2>
+                    <span class="metric-detail">Ingestion rate</span>
+                </div>
+            </div>
+            <div class="metric-card" id="metric-success">
+                <div class="card-icon green"><i class="fa-solid fa-square-check"></i></div>
+                <div class="card-content">
+                    <span class="metric-label">Success Rate</span>
+                    <h2 class="metric-value">100<span class="unit">%</span></h2>
+                    <span class="metric-detail">Healthy events</span>
+                </div>
+            </div>
+            <div class="metric-card" id="metric-latency">
+                <div class="card-icon purple"><i class="fa-solid fa-stopwatch"></i></div>
+                <div class="card-content">
+                    <span class="metric-label">Avg Latency</span>
+                    <h2 class="metric-value">-- <span class="unit">ms</span></h2>
+                    <span class="metric-detail">Gateway overhead</span>
+                </div>
+            </div>
+            <div class="metric-card" id="metric-dlq">
+                <div class="card-icon red"><i class="fa-solid fa-triangle-exclamation"></i></div>
+                <div class="card-content">
+                    <span class="metric-label">DLQ Counter</span>
+                    <h2 class="metric-value">0</h2>
+                    <span class="metric-detail">Schema rejections</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- Main Workspace Split -->
+        <div class="workspace">
+            <!-- Left Pane: Pipeline Diagram -->
+            <section class="pane topology-pane">
+                <div class="pane-header">
+                    <h2><i class="fa-solid fa-network-wired"></i> Pipeline Topology</h2>
+                    <span class="desc">Watch live events travel through processing nodes</span>
+                </div>
+                
+                <div class="canvas-container">
+                    <svg id="topology-svg" viewBox="0 0 800 450" preserveAspectRatio="xMidYMid meet">
+                        <!-- Defs for gradients/markers -->
+                        <defs>
+                            <linearGradient id="link-grad" x1="0%" y1="0%" x2="100%" y2="0%">
+                                <stop offset="0%" stop-color="#00f2fe" stop-opacity="0.2"/>
+                                <stop offset="100%" stop-color="#0072ff" stop-opacity="0.2"/>
+                            </linearGradient>
+                            
+                            <!-- Node Glow Filters -->
+                            <filter id="glow-cyan" x="-20%" y="-20%" width="140%" height="140%">
+                                <feGaussianBlur stdDeviation="6" result="blur" />
+                                <feComposite in="SourceGraphic" in2="blur" operator="over" />
+                            </filter>
+                        </defs>
+
+                        <!-- Links (Connection Paths) -->
+                        <!-- 1. Source -> Gateway -->
+                        <path id="path-source-gateway" d="M 100 200 L 220 200" class="conn-line"/>
+                        <!-- 2. Gateway -> Kafka Raw -->
+                        <path id="path-gateway-raw" d="M 220 200 L 340 200" class="conn-line"/>
+                        <!-- 3. Kafka Raw -> Processor -->
+                        <path id="path-raw-processor" d="M 340 200 L 460 200" class="conn-line"/>
+                        
+                        <!-- 4. Processor -> Kafka Parsed (Normal route) -->
+                        <path id="path-processor-parsed" d="M 460 200 C 520 120, 540 120, 580 120" class="conn-line"/>
+                        <!-- 5. Processor -> Kafka DLQ (Error/Schema mismatch route) -->
+                        <path id="path-processor-dlq" d="M 460 200 C 520 280, 540 280, 580 280" class="conn-line"/>
+                        
+                        <!-- 6. Kafka Parsed -> ClickHouse -->
+                        <path id="path-parsed-clickhouse" d="M 580 120 C 640 120, 660 200, 700 200" class="conn-line"/>
+                        <!-- 7. Kafka DLQ -> ClickHouse (Or separate DLQ destination) -->
+                        <path id="path-dlq-clickhouse" d="M 580 280 C 640 280, 660 200, 700 200" class="conn-line" style="stroke-dasharray: 4,4; stroke: rgba(243, 85, 136, 0.3);"/>
+
+                        <!-- Active Particles Layer (dynamically added in JS) -->
+                        <g id="particles-group"></g>
+
+                        <!-- Nodes -->
+                        <!-- Node 1: Sources -->
+                        <g class="node-group" transform="translate(100, 200)">
+                            <circle class="node-glow cyan" r="30"/>
+                            <circle class="node-base" r="24"/>
+                            <foreignObject x="-12" y="-12" width="24" height="24">
+                                <div style="display: flex; justify-content: center; align-items: center; width: 100%; height: 100%;">
+                                    <i class="fa-solid fa-server" style="font-size: 16px; color: #00f2fe;"></i>
+                                </div>
+                            </foreignObject>
+                            <text class="node-label" y="45">Log Sources</text>
+                            <text class="node-sublabel" y="60">Wikimedia / NASA</text>
+                        </g>
+
+                        <!-- Node 2: Ingest Gateway -->
+                        <g class="node-group" transform="translate(220, 200)">
+                            <circle class="node-glow blue" r="30"/>
+                            <circle class="node-base" r="24"/>
+                            <foreignObject x="-12" y="-12" width="24" height="24">
+                                <div style="display: flex; justify-content: center; align-items: center; width: 100%; height: 100%;">
+                                    <i class="fa-solid fa-door-open" style="font-size: 16px; color: #0072ff;"></i>
+                                </div>
+                            </foreignObject>
+                            <text class="node-label" y="45">Ingest Gateway</text>
+                            <text class="node-sublabel" y="60">FastAPI :8100</text>
+                        </g>
+
+                        <!-- Node 3: Kafka raw-logs -->
+                        <g class="node-group" transform="translate(340, 200)">
+                            <circle class="node-glow purple" r="30"/>
+                            <circle class="node-base" r="24"/>
+                            <foreignObject x="-12" y="-12" width="24" height="24">
+                                <div style="display: flex; justify-content: center; align-items: center; width: 100%; height: 100%;">
+                                    <i class="fa-solid fa-cubes" style="font-size: 16px; color: #a55eea;"></i>
+                                </div>
+                            </foreignObject>
+                            <text class="node-label" y="45">Kafka raw-logs</text>
+                            <text class="node-sublabel" y="60">6 Partitions</text>
+                        </g>
+
+                        <!-- Node 4: Stream Processor -->
+                        <g class="node-group" transform="translate(460, 200)">
+                            <circle class="node-glow orange" r="30"/>
+                            <circle class="node-base" r="24"/>
+                            <foreignObject x="-12" y="-12" width="24" height="24">
+                                <div style="display: flex; justify-content: center; align-items: center; width: 100%; height: 100%;">
+                                    <i class="fa-solid fa-gear" style="font-size: 16px; color: #ff9f43;"></i>
+                                </div>
+                            </foreignObject>
+                            <text class="node-label" y="45">Stream Processor</text>
+                            <text class="node-sublabel" y="60">Python main.py</text>
+                        </g>
+
+                        <!-- Node 5: Kafka parsed-logs -->
+                        <g class="node-group" transform="translate(580, 120)">
+                            <circle class="node-glow green" r="30"/>
+                            <circle class="node-base" r="24"/>
+                            <foreignObject x="-12" y="-12" width="24" height="24">
+                                <div style="display: flex; justify-content: center; align-items: center; width: 100%; height: 100%;">
+                                    <i class="fa-solid fa-list-check" style="font-size: 16px; color: #10ac84;"></i>
+                                </div>
+                            </foreignObject>
+                            <text class="node-label" y="45">parsed-logs</text>
+                            <text class="node-sublabel" y="60">Topic</text>
+                        </g>
+
+                        <!-- Node 6: Kafka dead-letter-queue -->
+                        <g class="node-group" transform="translate(580, 280)">
+                            <circle class="node-glow red" r="30"/>
+                            <circle class="node-base" r="24"/>
+                            <foreignObject x="-12" y="-12" width="24" height="24">
+                                <div style="display: flex; justify-content: center; align-items: center; width: 100%; height: 100%;">
+                                    <i class="fa-solid fa-skull" style="font-size: 16px; color: #ee5253;"></i>
+                                </div>
+                            </foreignObject>
+                            <text class="node-label" y="45">dead-letter-queue</text>
+                            <text class="node-sublabel" y="60">DLQ Topic</text>
+                        </g>
+
+                        <!-- Node 7: ClickHouse -->
+                        <g class="node-group" transform="translate(700, 200)">
+                            <circle class="node-glow yellow" r="30"/>
+                            <circle class="node-base" r="24"/>
+                            <foreignObject x="-12" y="-12" width="24" height="24">
+                                <div style="display: flex; justify-content: center; align-items: center; width: 100%; height: 100%;">
+                                    <i class="fa-solid fa-database" style="font-size: 16px; color: #ffdc34;"></i>
+                                </div>
+                            </foreignObject>
+                            <text class="node-label" y="45">ClickHouse</text>
+                            <text class="node-sublabel" y="60">logs_hot (hot tier)</text>
+                        </g>
+                    </svg>
+                </div>
+            </section>
+
+            <!-- Right Pane: Simulator & Terminal -->
+            <section class="pane control-pane">
+                <!-- Simulator -->
+                <div class="simulator-card">
+                    <div class="pane-header">
+                        <h2><i class="fa-solid fa-vial"></i> Interactive Simulator</h2>
+                        <span class="desc">Trigger manual requests and trace their paths instantly</span>
+                    </div>
+                    <div class="button-group">
+                        <button class="btn btn-healthy" id="btn-sim-healthy">
+                            <i class="fa-solid fa-heartbeat"></i> Inject Healthy Event
+                        </button>
+                        <button class="btn btn-error" id="btn-sim-error">
+                            <i class="fa-solid fa-bolt"></i> Inject Server Error
+                        </button>
+                        <button class="btn btn-corrupt" id="btn-sim-corrupt">
+                            <i class="fa-solid fa-bug"></i> Inject Corrupt Event
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Log Console Terminal -->
+                <div class="terminal-card">
+                    <div class="pane-header terminal-header">
+                        <h2><i class="fa-solid fa-terminal"></i> Log Pipe Terminal</h2>
+                        <div class="terminal-controls">
+                            <span class="badge" id="log-counter">0 events</span>
+                            <button class="icon-btn" id="btn-clear-terminal" title="Clear Terminal"><i class="fa-solid fa-trash-can"></i></button>
+                        </div>
+                    </div>
+                    <div class="terminal-body" id="log-terminal">
+                        <div class="log-line system-msg">
+                            <span class="time">10:00:00</span> <span class="tag info">[SYS]</span> Dashboard ready. Awaiting connection to gateway WebSocket...
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </div>
+    </div>
+
+    <!-- Custom JS -->
+    <script src="index.js"></script>
+</body>
+</html>

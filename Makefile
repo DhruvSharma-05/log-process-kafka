@@ -17,7 +17,7 @@ help:  ## Show available targets
 	@echo "  make load     Max-rate load test (200k events)"
 	@echo ""
 	@echo "Real-time ingestion:"
-	@echo "  make ingest      HTTP gateway on :8100 (POST logs from anything)"
+	@echo "  make ingest      HTTP gateway on :8100 (+ live tail UI at http://localhost:8100)"
 	@echo "  make wiki        Live Wikimedia edit firehose -> Kafka"
 	@echo "  make wiki-http   Same, but routed through the HTTP gateway"
 	@echo "  make send        Send one example log to the gateway"
