@@ -477,6 +477,7 @@ automatically; otherwise inference is used and labelled as such via `geo_source`
 
 ## Documentation
 
+- [`docs/DEMO.md`](docs/DEMO.md) — presenter's script: what to say, what to click, what people ask
 - [`IMPLEMENTATION.md`](IMPLEMENTATION.md) — milestone-by-milestone engineering log with every
   measurement and every bug found
 - [`docs/RUNBOOK.md`](docs/RUNBOOK.md) — what to do when lag grows, the DLQ fills, or a broker dies
